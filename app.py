@@ -12,6 +12,8 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
+import concurrent.futures
+import time
 
 # =========================
 # CONFIG
@@ -23,46 +25,32 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+st.set_option('client.showErrorDetails', False)
+
 PRIMARY = "#314397"
 ACCENT = "#E43238"
 
 # =========================
-# GEMINI
+# GEMINI (CACHE)
 # =========================
 
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model_gemini = genai.GenerativeModel("gemini-1.5-flash")
+@st.cache_resource
+def load_gemini():
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    return genai.GenerativeModel("gemini-1.5-flash")
+
+model_gemini = load_gemini()
 
 # =========================
-# STYLE (UX FIX)
+# STYLE
 # =========================
 
 st.markdown(f"""
 <style>
 body {{ background-color: #f5f7fb; }}
-
-.header {{
-    background:{PRIMARY};
-    padding:20px;
-    border-radius:12px;
-    color:white;
-}}
-
-.chat-user {{
-    background:#e3edff;
-    padding:15px;
-    border-radius:12px;
-    margin-top:10px;
-}}
-
-.chat-ai {{
-    background:white;
-    padding:15px;
-    border-radius:12px;
-    border-left:5px solid {ACCENT};
-    margin-top:10px;
-}}
-
+.header {{ background:{PRIMARY}; padding:20px; border-radius:12px; color:white; }}
+.chat-user {{ background:#e3edff; padding:15px; border-radius:12px; margin-top:10px; }}
+.chat-ai {{ background:white; padding:15px; border-radius:12px; border-left:5px solid {ACCENT}; margin-top:10px; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,13 +88,22 @@ def init_collection():
 init_collection()
 
 # =========================
-# MODEL
+# MODEL (CACHE)
 # =========================
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-def embed_batch(texts):
-    return model.encode(texts).tolist()
+model = load_model()
+
+# =========================
+# EMBEDDING (CACHE)
+# =========================
+
+@st.cache_data(show_spinner=False)
+def embed_batch(texts_tuple):
+    return model.encode(list(texts_tuple)).tolist()
 
 # =========================
 # HEADINGS
@@ -147,8 +144,35 @@ def extract_exact_sentence(paragraph, question):
     return best if best else paragraph[:300]
 
 # =========================
-# INGEST (BEZE ZMĚNY)
+# PARALELNÍ INGEST
 # =========================
+
+def process_page(file_name, page, i):
+    text = page.extract_text()
+    if not text:
+        return []
+
+    main, sub = detect_headings(text)
+    paragraphs = text.split("\n\n")
+
+    chunks = []
+
+    for para in paragraphs:
+        para = para.strip()
+        if len(para) < 50:
+            continue
+
+        chunks.append({
+            "id": str(uuid.uuid4()),
+            "text": para[:1500],
+            "page": i+1,
+            "source": file_name,
+            "heading": main,
+            "subheading": sub
+        })
+
+    return chunks
+
 
 def ingest_pdf(files):
     all_chunks = []
@@ -156,40 +180,38 @@ def ingest_pdf(files):
     progress = st.progress(0)
     status = st.empty()
 
-    total = len(files)
-    done = 0
+    total_files = len(files)
+    done_files = 0
 
     for file in files:
+
+        if file.name in st.session_state.files:
+            continue
+
         status.text(f"Zpracovávám: {file.name}")
 
         reader = PdfReader(file)
 
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text()
-            if not text:
-                continue
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(process_page, file.name, page, i)
+                for i, page in enumerate(reader.pages)
+            ]
 
-            main, sub = detect_headings(text)
-            paragraphs = text.split("\n\n")
+            for f in concurrent.futures.as_completed(futures):
+                all_chunks.extend(f.result())
 
-            for para in paragraphs:
-                para = para.strip()
-                if len(para) < 50:
-                    continue
+        done_files += 1
+        progress.progress(done_files / total_files)
 
-                all_chunks.append({
-                    "id": str(uuid.uuid4()),
-                    "text": para,
-                    "page": i+1,
-                    "source": file.name,
-                    "heading": main,
-                    "subheading": sub
-                })
+    if not all_chunks:
+        return
 
-        done += 1
-        progress.progress(done / total)
+    status.text("🔄 Embedding...")
 
-    vectors = embed_batch([c["text"] for c in all_chunks])
+    vectors = embed_batch(tuple([c["text"] for c in all_chunks]))
+
+    status.text("📦 Ukládám...")
 
     points = []
     for c, v in zip(all_chunks, vectors):
@@ -205,11 +227,12 @@ def ingest_pdf(files):
     status.text("✅ Hotovo")
 
 # =========================
-# SEARCH (TOP 3)
+# SEARCH (CACHE)
 # =========================
 
-def search(q):
-    vector = embed_batch([q])[0]
+@st.cache_data(show_spinner=False)
+def search_cached(q):
+    vector = embed_batch((q,))[0]
 
     results = qdrant.query_points(
         collection_name="docs",
@@ -237,14 +260,19 @@ def search(q):
     return contexts
 
 # =========================
-# AI (STRUKTUROVANÁ ODPOVĚĎ)
+# AI (STREAMING + PRAVIDLA)
 # =========================
 
-def ask_ai(q, contexts):
+def ask_ai_stream(q, contexts):
     combined = "\n\n".join([c["text"] for c in contexts])
 
     prompt = f"""
 Jsi odborník na pojistné podmínky.
+
+DŮLEŽITÉ:
+- odpovídej pouze z poskytnutého textu
+- nic si nevymýšlej
+- pokud odpověď v textu není, napiš že není k dispozici
 
 Odpověz strukturovaně:
 - krátké shrnutí
@@ -259,37 +287,41 @@ OTÁZKA:
 
     try:
         response = model_gemini.generate_content(prompt)
-        answer = response.text.strip()
+        full_answer = response.text.strip()
     except:
-        answer = contexts[0]["exact"]
+        full_answer = contexts[0]["exact"]
 
-    # 🔥 více citací
+    placeholder = st.empty()
+    streamed = ""
+
+    for word in full_answer.split():
+        streamed += word + " "
+        placeholder.markdown(f"🧠 Odpověď:\n\n{streamed}")
+        time.sleep(0.01)
+
     citations = "\n\n".join([
         f"\"{c['exact']}\"\n(str. {c['page']}, {c['heading']}, {c['subheading']})"
         for c in contexts[:3]
     ])
 
-    return f"""
+    placeholder.markdown(f"""
 🧠 Odpověď:
-{answer}
+{full_answer}
 
 📄 Citace:
 {citations}
-"""
+""")
+
+    return full_answer
 
 # =========================
-# UI
+# UI + SIDEBAR (ZACHOVÁNO)
 # =========================
 
 st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
 
-# =========================
-# SIDEBAR (OPRAVA)
-# =========================
-
 st.sidebar.markdown("## 🔐 Admin panel")
 
-# LOGIN je zpět v sidebaru
 pwd = st.sidebar.text_input("Heslo", type="password")
 
 if st.sidebar.button("Přihlásit"):
@@ -299,52 +331,40 @@ if st.sidebar.button("Přihlásit"):
     else:
         st.sidebar.error("Špatné heslo")
 
-# INFO pro nepřihlášené
 if not st.session_state.logged:
     st.sidebar.info("🔒 Přihlas se pro upload PDF")
 
-# UPLOAD (jen po loginu)
 if st.session_state.logged:
-    files = st.sidebar.file_uploader(
-        "📄 Vyber PDF",
-        accept_multiple_files=True
-    )
+    files = st.sidebar.file_uploader("📄 Vyber PDF", accept_multiple_files=True)
 
     if st.sidebar.button("🚀 Nahrát"):
         if files:
             ingest_pdf(files)
             st.sidebar.success("Hotovo")
-        else:
-            st.sidebar.warning("Vyber soubory")
-            
+
 # =========================
-# CHAT FLOW (FIX)
+# CHAT FLOW
 # =========================
 
 q = st.chat_input("Zeptej se...")
 
 if q:
-    # 👉 ihned zobraz dotaz
-    st.session_state.history.append({"q": q, "a": "⏳ Checker hledá..."})
-
-    # 👉 rerender okamžitě
+    st.session_state.history.insert(0, {"q": q, "a": "⏳ Checker hledá..."})
     st.rerun()
 
-# odpověď AI
 if st.session_state.history and st.session_state.history[0]["a"] == "⏳ Checker hledá...":
     last = st.session_state.history[0]
 
-    with st.spinner("🔍 Hledám v dokumentech..."):
-        contexts = search(last["q"])
+    with st.spinner("🔍 Prohledávám dokumenty..."):
+        contexts = search_cached(last["q"])
 
     if contexts:
-        with st.spinner("🤖 Generuji odpověď..."):
-            answer = ask_ai(last["q"], contexts)
+        with st.spinner("🤖 Checker přemýšlí..."):
+            answer = ask_ai_stream(last["q"], contexts)
     else:
         answer = "❌ Nic nenalezeno"
 
     st.session_state.history[0]["a"] = answer
-    st.rerun()
 
 # =========================
 # RENDER CHAT
