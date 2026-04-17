@@ -1,47 +1,33 @@
 import streamlit as st
-import requests
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, Filter, FieldCondition, MatchValue
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from pypdf import PdfReader
 import pdfplumber
-import re
 import uuid
-import base64
-from datetime import datetime
-import json
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import re
 import google.generativeai as genai
-import time
 
 # =========================
 # CONFIG
 # =========================
 
-VECTOR_SIZE = 768  # 🔥 FIX
+VECTOR_SIZE = 768
+DEBUG = st.secrets.get("DEBUG", False)
 
-st.set_page_config(
-    page_title="VPP Checker",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.set_option('client.showErrorDetails', False)
-
-PRIMARY = "#314397"
-ACCENT = "#E43238"
+st.set_page_config(page_title="VPP Checker", layout="wide")
 
 # =========================
-# GEMINI
+# DEBUG PANEL
 # =========================
 
-@st.cache_resource
-def load_gemini():
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    return genai.GenerativeModel("gemini-1.5-flash")
+if DEBUG:
+    st.markdown("### 🛠️ Debug panel")
+    st.json(st.session_state)
 
-model_gemini = load_gemini()
+def log(msg):
+    if DEBUG:
+        st.write(f"🪵 {msg}")
 
 # =========================
 # SESSION
@@ -57,6 +43,13 @@ if "logged" not in st.session_state:
     st.session_state.logged = False
 
 # =========================
+# GEMINI
+# =========================
+
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model_gemini = genai.GenerativeModel("gemini-1.5-flash")
+
+# =========================
 # QDRANT
 # =========================
 
@@ -68,13 +61,10 @@ qdrant = QdrantClient(
 def init_collection():
     try:
         info = qdrant.get_collection("docs")
+        size = info.config.params.vectors.size
 
-        current_size = info.config.params.vectors.size
-
-        if current_size != VECTOR_SIZE:
-            print("⚠️ Dimenze nesedí → mažu kolekci")
+        if size != VECTOR_SIZE:
             qdrant.delete_collection("docs")
-
             raise Exception("recreate")
 
     except:
@@ -86,88 +76,65 @@ def init_collection():
 init_collection()
 
 # =========================
+# HEALTH CHECK
+# =========================
+
+def health_check():
+    status = {}
+
+    try:
+        qdrant.get_collection("docs")
+        status["Qdrant"] = "🟢 OK"
+    except:
+        status["Qdrant"] = "🔴 ERROR"
+
+    try:
+        _ = model_gemini.generate_content("test")
+        status["Gemini"] = "🟢 OK"
+    except:
+        status["Gemini"] = "🔴 ERROR"
+
+    status["Session"] = "🟢 OK" if "history" in st.session_state else "🔴 ERROR"
+
+    return status
+
+if DEBUG:
+    st.markdown("### 🧪 Health check")
+    st.json(health_check())
+
+# =========================
 # MODEL
 # =========================
 
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("intfloat/multilingual-e5-base")
-
-model = load_model()
-
-@st.cache_resource
-def load_reranker():
-    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
-reranker = load_reranker()
+model = SentenceTransformer("intfloat/multilingual-e5-base")
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # =========================
-# EMBEDDING
+# HELPERS
 # =========================
 
-@st.cache_data(show_spinner=False)
-def embed_batch(texts_tuple):
-    return model.encode(list(texts_tuple)).tolist()
+def embed(texts):
+    return model.encode(texts).tolist()
 
-# =========================
-# PDF EXTRACT
-# =========================
-
-def safe_extract_text_pypdf(page, page_num, file_name):
-    try:
-        return page.extract_text()
-    except Exception as e:
-        print(f"[pypdf FAIL] {file_name} | strana {page_num}: {e}")
-        return None
-
-def extract_with_pdfplumber(file):
-    texts = []
-    try:
-        with pdfplumber.open(file) as pdf:
-            for i, page in enumerate(pdf.pages):
-                try:
-                    text = page.extract_text()
-                    texts.append((i, text))
-                except:
-                    texts.append((i, None))
-    except:
-        pass
-    return texts
-
-# =========================
-# CHUNKING
-# =========================
-
-def smart_chunk(text, chunk_size=800, overlap=150):
+def smart_chunk(text, size=800, overlap=150):
     chunks = []
-    start = 0
-
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
-
+    i = 0
+    while i < len(text):
+        chunks.append(text[i:i+size])
+        i += size - overlap
     return chunks
 
-def process_text_to_chunks(file_name, text, page_num):
-    if not text:
-        return []
-
-    paragraphs = smart_chunk(text)
-
+def process_text(file, text, page):
     chunks = []
-
-    for para in paragraphs:
-        if len(para) < 50:
+    for c in smart_chunk(text):
+        if len(c) < 50:
             continue
-
         chunks.append({
             "id": str(uuid.uuid4()),
-            "text": para[:1500],
-            "page": page_num,
-            "source": file_name
+            "text": c,
+            "page": page,
+            "source": file
         })
-
     return chunks
 
 # =========================
@@ -180,65 +147,98 @@ def ingest_pdf(files):
     progress = st.progress(0)
     status = st.empty()
 
-    total_files = len(files)
-    done_files = 0
-
-    for file in files:
-
-        if file.name in st.session_state.files:
-            continue
-
-        status.text(f"📄 Zpracovávám: {file.name}")
-
+    for idx, file in enumerate(files):
         reader = PdfReader(file)
-        plumber_data = None
 
         for i, page in enumerate(reader.pages):
-            text = safe_extract_text_pypdf(page, i+1, file.name)
+            status.text(f"{file.name} | {i+1}/{len(reader.pages)}")
+
+            try:
+                text = page.extract_text()
+            except:
+                text = None
 
             if not text:
-                if plumber_data is None:
-                    status.text(f"⚠️ Fallback na pdfplumber: {file.name}")
-                    plumber_data = extract_with_pdfplumber(file)
+                try:
+                    with pdfplumber.open(file) as pdf:
+                        text = pdf.pages[i].extract_text()
+                except:
+                    continue
 
-                _, text = plumber_data[i]
+            all_chunks.extend(process_text(file.name, text, i+1))
 
-            chunks = process_text_to_chunks(file.name, text, i+1)
-            all_chunks.extend(chunks)
-
-        done_files += 1
-        progress.progress(done_files / total_files)
+        progress.progress((idx+1)/len(files))
 
     if not all_chunks:
-        status.text("❌ Žádná data")
+        st.error("❌ Žádná data")
         return
 
-    status.text("🔄 Embedding...")
-    vectors = embed_batch(tuple([c["text"] for c in all_chunks]))
-
-    status.text("📦 Ukládám...")
+    vectors = embed([c["text"] for c in all_chunks])
 
     points = []
     for c, v in zip(all_chunks, vectors):
-        points.append({
-            "id": c["id"],
-            "vector": v,
-            "payload": c
-        })
+        points.append({"id": c["id"], "vector": v, "payload": c})
 
-    qdrant.upsert(collection_name="docs", points=points)
+    qdrant.upsert("docs", points)
+    st.success("✅ Hotovo")
 
-    progress.progress(1.0)
-    status.text("✅ Hotovo")
+# =========================
+# SEARCH
+# =========================
+
+def search(q):
+    vec = embed([q])[0]
+
+    results = qdrant.query_points("docs", query=vec, limit=10).points
+
+    if not results:
+        return []
+
+    pairs = [(q, r.payload["text"]) for r in results]
+    scores = reranker.predict(pairs)
+
+    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
+
+    return [
+        {
+            "text": r.payload["text"],
+            "page": r.payload["page"],
+            "score": float(s)
+        }
+        for r, s in ranked[:5]
+    ]
+
+# =========================
+# AI
+# =========================
+
+def ask(q, ctx):
+    if not ctx:
+        return "❌ Nic nenalezeno"
+
+    combined = "\n\n".join([c["text"] for c in ctx])
+
+    try:
+        r = model_gemini.generate_content(f"{combined}\n\n{q}")
+        return r.text
+    except:
+        return ctx[0]["text"][:200]
+
+# =========================
+# UI GUARD
+# =========================
+
+if "history" not in st.session_state:
+    st.error("❌ Session error")
+    st.stop()
 
 # =========================
 # UI
 # =========================
 
-st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
+st.title("🛡️ VPP Checker")
 
-st.sidebar.markdown("## 🔐 Admin panel")
-
+# LOGIN
 if not st.session_state.logged:
     pwd = st.sidebar.text_input("Heslo", type="password")
 
@@ -250,12 +250,31 @@ if not st.session_state.logged:
             st.sidebar.error("Špatné heslo")
 
 else:
-    st.sidebar.success("✅ Přihlášeno jako admin")
+    st.sidebar.success("✅ Admin")
 
-    files = st.sidebar.file_uploader("📄 Vyber PDF", accept_multiple_files=True)
+    files = st.sidebar.file_uploader("PDF", accept_multiple_files=True)
 
-    if st.sidebar.button("🚀 Nahrát"):
+    if st.sidebar.button("Nahrát"):
         if files:
             ingest_pdf(files)
             st.session_state.files = {f.name: True for f in files}
-            st.sidebar.success("Hotovo")
+
+# =========================
+# CHAT
+# =========================
+
+q = st.chat_input("Zeptej se...")
+
+if q:
+    ctx = search(q)
+    ans = ask(q, ctx)
+
+    st.session_state.history.insert(0, {"q": q, "a": ans})
+
+# =========================
+# RENDER
+# =========================
+
+for h in st.session_state.history:
+    st.markdown(f"**Ty:** {h['q']}")
+    st.markdown(f"**AI:** {h['a']}")
