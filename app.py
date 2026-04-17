@@ -21,7 +21,8 @@ def load_llm():
     return pipeline(
         "text2text-generation",
         model="google/flan-t5-base",
-        max_length=512
+        max_length=512,
+        do_sample=False
     )
 
 embed_model = load_embedding_model()
@@ -36,7 +37,7 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-collection = "docs_v7"
+collection = "docs_final"
 
 try:
     qdrant.get_collection(collection)
@@ -62,12 +63,30 @@ if "files" not in st.session_state:
 
 def embed_passages(texts):
     texts = [f"passage: {t}" for t in texts]
-    vectors = embed_model.encode(texts)
-    return [[float(x) for x in v] for v in vectors]
+    return embed_model.encode(texts)
 
 def embed_query(text):
-    vec = embed_model.encode([f"query: {text}"])[0]
-    return [float(x) for x in vec]
+    return embed_model.encode([f"query: {text}"])[0]
+
+# =========================
+# 🧠 HEADINGS
+# =========================
+
+def detect_headings(text):
+    lines = text.split("\n")
+
+    main = ""
+    sub = ""
+
+    for line in lines:
+        line = line.strip()
+
+        if line.isupper() and len(line) > 5:
+            main = line
+        elif re.match(r'^\d+(\.\d+)*\s', line):
+            sub = line
+
+    return main, sub
 
 # =========================
 # ✂️ CHUNKING
@@ -91,7 +110,7 @@ def split_text(text, chunk_size=400):
     return chunks
 
 # =========================
-# 🚀 INGEST (FAST)
+# 🚀 INGEST
 # =========================
 
 def ingest_pdf(file):
@@ -103,24 +122,20 @@ def ingest_pdf(file):
 
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
-
-        if not text or len(text.strip()) < 30:
+        if not text:
             continue
 
+        main, sub = detect_headings(text)
         chunks = split_text(text)
 
         for chunk in chunks:
-            if not chunk or len(chunk.strip()) < 20:
-                continue
-
             all_chunks.append(chunk)
             metadata.append({
+                "page": i + 1,
                 "source": file.name,
-                "page": i + 1
+                "heading": main,
+                "subheading": sub
             })
-
-    if not all_chunks:
-        return 0
 
     embeddings = embed_passages(all_chunks)
 
@@ -128,65 +143,79 @@ def ingest_pdf(file):
     for i, emb in enumerate(embeddings):
         points.append({
             "id": str(uuid.uuid4()),
-            "vector": emb,
+            "vector": [float(x) for x in emb],
             "payload": {
                 "text": all_chunks[i],
-                "source": metadata[i]["source"],
-                "page": metadata[i]["page"]
+                **metadata[i]
             }
         })
 
-    batch_size = 50
-    for i in range(0, len(points), batch_size):
-        qdrant.upsert(
-            collection_name=collection,
-            points=points[i:i+batch_size]
-        )
+    for i in range(0, len(points), 50):
+        qdrant.upsert(collection_name=collection, points=points[i:i+50])
 
     return len(points)
 
 # =========================
-# 🧠 LLM ODPOVĚĎ
+# 🧠 VÝBĚR VĚT
 # =========================
 
-def generate_llm_answer(question, contexts):
-    context_text = "\n\n".join(contexts[:3])
+def extract_relevant_sentences(text, question):
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    q_emb = embed_query(question)
 
+    scored = []
+    for s in sentences:
+        if len(s) < 30:
+            continue
+        emb = embed_passages([s])[0]
+        score = sum(a*b for a, b in zip(emb, q_emb))
+        scored.append((score, s))
+
+    scored.sort(reverse=True)
+    return [s for _, s in scored[:2]]
+
+# =========================
+# 🧠 AI
+# =========================
+
+def extract_facts(question, contexts):
     prompt = f"""
-Odpověz na otázku pouze na základě textu.
+Vyber přesné citace z textu.
 
-Používej citace [str. X].
-Nevymýšlej si informace.
+TEXT:
+{chr(10).join(contexts)}
 
-Text:
-{context_text}
-
-Otázka:
+OTÁZKA:
 {question}
 
-Odpověď:
+FAKTA:
 """
+    return llm(prompt)[0]["generated_text"]
 
-    result = llm(prompt)[0]["generated_text"]
-    return result
+def generate_answer(question, facts):
+    prompt = f"""
+Jsi odborník na pojištění.
+
+Odpověz profesionálně a srozumitelně.
+
+FAKTA:
+{facts}
+
+OTÁZKA:
+{question}
+
+ODPOVĚĎ:
+"""
+    return llm(prompt)[0]["generated_text"]
 
 # =========================
 # 🔍 SEARCH
 # =========================
 
-def search(question, doc_filter=None):
-    q_emb = embed_query(question)
-
-    query_filter = None
-    if doc_filter and doc_filter != "Vše":
-        query_filter = {
-            "must": [{"key": "source", "match": {"value": doc_filter}}]
-        }
-
+def search(question):
     results = qdrant.query_points(
         collection_name=collection,
-        query=q_emb,
-        query_filter=query_filter,
+        query=embed_query(question),
         limit=5
     ).points
 
@@ -194,14 +223,15 @@ def search(question, doc_filter=None):
     sources = []
 
     for r in results:
-        text = r.payload["text"]
-        page = r.payload["page"]
-        source = r.payload["source"]
+        sentences = extract_relevant_sentences(r.payload["text"], question)
 
-        contexts.append(f"[str. {page}] {text}")
-        sources.append((source, page))
+        for s in sentences:
+            contexts.append(f"[str. {r.payload['page']}] {s}")
 
-    answer = generate_llm_answer(question, contexts)
+        sources.append(r.payload)
+
+    facts = extract_facts(question, contexts)
+    answer = generate_answer(question, facts)
 
     return answer, sources
 
@@ -209,126 +239,53 @@ def search(question, doc_filter=None):
 # 📄 PDF VIEW
 # =========================
 
-def show_pdf(file, page):
+def show_pdf(file, page, text):
     file.seek(0)
-    base64_pdf = base64.b64encode(file.read()).decode("utf-8")
+    base64_pdf = base64.b64encode(file.read()).decode()
 
     st.markdown(f"""
     <iframe src="data:application/pdf;base64,{base64_pdf}#page={page}"
     width="100%" height="600"></iframe>
     """, unsafe_allow_html=True)
 
-# =========================
-# 🎨 DESIGN
-# =========================
-
-PRIMARY = "#314397"
-ACCENT = "#E43238"
-
-st.set_page_config(page_title="VPP Checker", layout="wide")
-
-st.markdown(f"""
-<style>
-.block-container {{padding-top:2rem;}}
-.header {{background:{PRIMARY};padding:20px;border-radius:12px;color:white;}}
-.card {{background:white;padding:20px;border-radius:12px;border-left:6px solid {ACCENT};margin-top:20px;}}
-.source {{background:white;padding:10px;border-radius:8px;margin-top:5px;border-left:3px solid {PRIMARY};}}
-.highlight {{background:#fff3cd;}}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header">
-<h2>🛡️ VPP Checker</h2>
-<p>AI kontrola pojistných podmínek</p>
-</div>
-""", unsafe_allow_html=True)
-
-# =========================
-# SIDEBAR
-# =========================
-
-st.sidebar.markdown("### 📊 Ovládání")
-
-if st.sidebar.button("🗑️ Vymazat historii"):
-    st.session_state.history = []
-
-pwd = st.sidebar.text_input("Admin heslo", type="password")
-
-if pwd == st.secrets["ADMIN_PASSWORD"]:
-    files = st.sidebar.file_uploader(
-        "Nahraj PDF",
-        type="pdf",
-        accept_multiple_files=True
-    )
-
-    if files and st.sidebar.button("Nahrát všechny"):
-        progress = st.progress(0)
-
-        total_files = len(files)
-        total_chunks = 0
-
-        for idx, file in enumerate(files):
-            st.sidebar.write(f"📄 {file.name}")
-            chunks = ingest_pdf(file)
-            total_chunks += chunks
-
-            progress.progress((idx + 1) / total_files)
-
-        st.sidebar.success(
-            f"✅ Nahráno {total_files} souborů ({total_chunks} částí)"
-        )
-
-# =========================
-# FILTER
-# =========================
-
-@st.cache_data
-def get_documents():
-    res = qdrant.scroll(collection_name=collection, limit=1000)
-    return list({p.payload["source"] for p in res[0]})
-
-docs = get_documents()
-selected_doc = st.sidebar.selectbox("Filtr dokumentu", ["Vše"] + docs)
-
-# =========================
-# DOTAZ
-# =========================
-
-st.markdown("### 🔍 Zadej dotaz")
-q = st.text_input("")
-
-if st.button("Odeslat") and q:
-    answer, sources = search(q, selected_doc)
-
-    st.session_state.history.append({
-        "question": q,
-        "answer": answer,
-        "sources": sources
-    })
-
-# =========================
-# HISTORIE
-# =========================
-
-for item in reversed(st.session_state.history):
     st.markdown(f"""
-    <div class="card">
-    <b>❓ {item['question']}</b><br><br>
-    {item['answer']}
+    <div style="background:#fff3cd;padding:15px;border-left:5px solid red;">
+    {text}
     </div>
     """, unsafe_allow_html=True)
 
-    for src, page in item["sources"]:
-        st.markdown(f"""
-        <div class="source">
-        <b>{src}</b> – str. {page}
-        </div>
-        """, unsafe_allow_html=True)
+# =========================
+# UI
+# =========================
 
-        if src in st.session_state.files:
-            if st.button(
-                f"Otevřít {src} str. {page}",
-                key=f"{src}-{page}"
-            ):
-                show_pdf(st.session_state.files[src], page)
+pwd = st.sidebar.text_input("Heslo", type="password")
+
+if pwd == st.secrets["ADMIN_PASSWORD"]:
+    files = st.sidebar.file_uploader("PDF", accept_multiple_files=True)
+
+    if files and st.sidebar.button("Nahrát"):
+        for f in files:
+            ingest_pdf(f)
+
+q = st.text_input("Dotaz")
+
+if st.button("Odeslat") and q:
+    answer, sources = search(q)
+
+    st.write(answer)
+
+    for i, s in enumerate(sources):
+        st.markdown(f"""
+        **{s['source']}**  
+        str. {s['page']}  
+        {s['heading']}  
+        {s['subheading']}
+        """)
+
+        if s["source"] in st.session_state.files:
+            if st.button(f"Otevřít", key=i):
+                show_pdf(
+                    st.session_state.files[s["source"]],
+                    s["page"],
+                    s["text"][:300]
+                )
