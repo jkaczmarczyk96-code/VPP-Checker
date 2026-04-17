@@ -1,6 +1,7 @@
-streamlit
-qdrant-client
-sentence-transformers
-pypdf
-requests
-torch
+streamlit==1.33.0
+qdrant-client==1.9.1
+sentence-transformers==2.7.0
+transformers==4.41.2
+torch==2.2.2
+pypdf==4.2.0
+requests==2.31.0
