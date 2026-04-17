@@ -9,6 +9,7 @@ import re
 import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
 # =========================
 # CONFIG
@@ -37,11 +38,11 @@ st.markdown("""
 
 for key, default in {
     "history": [],
-    "files": {},
     "feedback": [],
     "feedback_done": {},
     "feedback_open": {},
-    "logged": False
+    "logged": False,
+    "last_logged": None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -58,10 +59,22 @@ model_gemini = genai.GenerativeModel("gemini-1.5-flash")
 # =========================
 
 @st.cache_resource
-def get_sheet():
+def get_client():
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
-    return gspread.authorize(creds).open("VPP_Feedback").sheet1
+    return gspread.authorize(creds)
+
+@st.cache_resource
+def get_feedback_sheet():
+    return get_client().open("VPP_Feedback").worksheet("feedback")
+
+@st.cache_resource
+def get_logs_sheet():
+    return get_client().open("VPP_Feedback").worksheet("logs")
+
+@st.cache_resource
+def get_analytics_sheet():
+    return get_client().open("VPP_Feedback").worksheet("analytics")
 
 def classify_error(note):
     if not note:
@@ -76,26 +89,85 @@ def classify_error(note):
     return "other"
 
 def save_feedback(q, a, rating, note=""):
+    key = f"{q}_{a}_{rating}_{note}"
+    if st.session_state.get("last_feedback") == key:
+        return
+    st.session_state["last_feedback"] = key
+
+    error_type = classify_error(note)
+
+    st.session_state.feedback.append({
+        "q": q,
+        "a": a,
+        "rating": rating,
+        "note": note,
+        "error_type": error_type
+    })
+
     try:
-        key = f"{q}_{a}_{rating}_{note}"
-        if st.session_state.get("last_feedback") == key:
-            return
-        st.session_state["last_feedback"] = key
+        get_feedback_sheet().append_row([
+            q,
+            a,
+            rating,
+            note,
+            error_type,
+            selected_insurer,
+            selected_vpp
+        ])
+    except:
+        pass
 
-        error_type = classify_error(note)
+# =========================
+# LOGGING + ANALYTICS
+# =========================
 
-        st.session_state.feedback.append({
-            "q": q,
-            "a": a,
-            "rating": rating,
-            "note": note,
-            "error_type": error_type
-        })
+def log_query(q, insurer, vpp, confidence):
+    timestamp = str(datetime.now())
+    log_key = f"{q}_{timestamp}"
 
-        get_sheet().append_row([q, a, rating, note, error_type])
+    if st.session_state.get("last_logged") == log_key:
+        return
 
-    except Exception as e:
-        print("Sheets error:", e)
+    st.session_state["last_logged"] = log_key
+
+    try:
+        get_logs_sheet().append_row([timestamp, q, insurer, vpp, confidence])
+    except:
+        pass
+
+    try:
+        get_analytics_sheet().append_row([timestamp, q, insurer, vpp, confidence])
+    except:
+        pass
+
+# =========================
+# ALERTS
+# =========================
+
+def check_alerts():
+    try:
+        rows = get_feedback_sheet().get_all_records()
+
+        query_counts = {}
+        vpp_counts = {}
+
+        for r in rows:
+            if r.get("rating") == "dislike":
+                q = r.get("q")
+                vpp = r.get("vpp", "unknown")
+
+                if q:
+                    query_counts[q] = query_counts.get(q, 0) + 1
+                if vpp:
+                    vpp_counts[vpp] = vpp_counts.get(vpp, 0) + 1
+
+        bad_queries = [q for q, c in query_counts.items() if c >= 3]
+        bad_vpps = [v for v, c in vpp_counts.items() if c >= 5]
+
+        return bad_queries, bad_vpps
+
+    except:
+        return [], []
 
 # =========================
 # QDRANT
@@ -108,10 +180,7 @@ qdrant = QdrantClient(
 
 def init_collection():
     try:
-        info = qdrant.get_collection("docs")
-        if info.config.params.vectors.size != VECTOR_SIZE:
-            qdrant.delete_collection("docs")
-            raise Exception()
+        qdrant.get_collection("docs")
     except:
         qdrant.create_collection(
             collection_name="docs",
@@ -121,7 +190,7 @@ def init_collection():
 init_collection()
 
 # =========================
-# MODEL
+# MODELS
 # =========================
 
 @st.cache_resource
@@ -152,12 +221,7 @@ def smart_chunk(text, size=800, overlap=150):
 def extract_exact_sentence(paragraph, question):
     sentences = re.split(r'(?<=[.!?]) +', paragraph)
     q_words = set(question.lower().split())
-    best, best_score = "", 0
-    for s in sentences:
-        score = len(q_words & set(s.lower().split()))
-        if score > best_score:
-            best, best_score = s, score
-    return best if best else paragraph[:300]
+    return max(sentences, key=lambda s: len(q_words & set(s.lower().split())), default=paragraph)
 
 # =========================
 # INGEST
@@ -197,7 +261,7 @@ def ingest_pdf(files, vpp_name, insurer):
     qdrant.upsert("docs", points)
 
 # =========================
-# FILTR
+# FILTR + ALERTS
 # =========================
 
 st.sidebar.markdown("## 📂 Filtr dokumentů")
@@ -212,10 +276,7 @@ def get_insurers():
 def get_vpps(insurer):
     try:
         res = qdrant.scroll("docs", limit=1000, with_payload=True)
-        return sorted(set(
-            r.payload.get("vpp_name") for r in res[0]
-            if r.payload.get("insurer") == insurer
-        ))
+        return sorted(set(r.payload.get("vpp_name") for r in res[0] if r.payload.get("insurer") == insurer))
     except:
         return []
 
@@ -228,8 +289,42 @@ if selected_insurer != "— vyber —":
 else:
     selected_vpp = None
 
+# 🔐 ADMIN + ALERTY
+st.sidebar.markdown("## 🔐 Administrace")
+
+if not st.session_state.logged:
+    pwd = st.sidebar.text_input("Heslo", type="password")
+    if st.sidebar.button("Přihlásit"):
+        if pwd == st.secrets["ADMIN_PASSWORD"]:
+            st.session_state.logged = True
+            st.rerun()
+else:
+    files = st.sidebar.file_uploader("PDF", accept_multiple_files=True)
+    vpp_name = st.sidebar.text_input("Název VPP")
+    insurer = st.sidebar.text_input("Pojišťovna")
+
+    if st.sidebar.button("Nahrát"):
+        if files and vpp_name and insurer:
+            ingest_pdf(files, vpp_name, insurer)
+
+    # ALERTY
+    bad_q, bad_v = check_alerts()
+
+    if bad_q or bad_v:
+        st.sidebar.markdown("## 🚨 Alerty")
+
+        if bad_q:
+            st.sidebar.error("Problémové dotazy:")
+            for q in bad_q[:3]:
+                st.sidebar.write(f"- {q}")
+
+        if bad_v:
+            st.sidebar.error("Problémové VPP:")
+            for v in bad_v[:3]:
+                st.sidebar.write(f"- {v}")
+
 # =========================
-# SEARCH + CONFIDENCE
+# SEARCH
 # =========================
 
 def search(q):
@@ -251,24 +346,32 @@ def search(q):
     pairs = [(q, r.payload["text"]) for r in results]
     scores = reranker.predict(pairs)
 
-    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
+    ranked = list(zip(results, scores))
 
-    top_score = float(ranked[0][1])
-    confidence = max(0, min(100, int((top_score + 5) * 10)))  # normalizace
+    for i, (r, s) in enumerate(ranked):
+        for fb in st.session_state.feedback:
+            snippet = fb["a"][:200] if fb.get("a") else ""
+            if snippet and snippet in r.payload["text"]:
+                if fb["rating"] == "like":
+                    s += 0.4
+                elif fb["rating"] == "dislike":
+                    s -= 0.7
+        ranked[i] = (r, s)
 
-    contexts = []
-    for r, _ in ranked[:5]:
-        p = r.payload
-        contexts.append({
-            "text": p["text"],
-            "exact": extract_exact_sentence(p["text"], q),
-            "page": p["page"]
-        })
+    ranked = sorted(ranked, key=lambda x: x[1], reverse=True)
+
+    confidence = max(0, min(100, int((float(ranked[0][1]) + 5) * 10)))
+
+    contexts = [{
+        "text": r.payload["text"],
+        "exact": extract_exact_sentence(r.payload["text"], q),
+        "page": r.payload["page"]
+    } for r, _ in ranked[:5]]
 
     return contexts, confidence
 
 # =========================
-# GUARDRAILS + AI
+# AI
 # =========================
 
 def is_dental_query(q):
@@ -281,55 +384,34 @@ def ask(q, ctx, confidence):
     if not ctx:
         return "❌ Nenalezeno. 👉 Konzultuj s vedením směny."
 
-    summary = ctx[0]["exact"]
-
-    citations = "\n".join([
-        f"- \"{c['exact']}\" (str. {c['page']})"
-        for c in ctx
-    ])
+    combined = "\n\n".join([c["text"] for c in ctx])
+    citations = "\n".join([f"- \"{c['exact']}\" (str. {c['page']})" for c in ctx])
 
     conf_class = "conf-high" if confidence > 70 else "conf-mid" if confidence > 40 else "conf-low"
 
-    return f"""
-<span class="{conf_class}">Spolehlivost: {confidence}%</span>
+    if confidence < 40:
+        return f"<span class='{conf_class}'>Spolehlivost: {confidence}%</span>\n\n❗ Konzultuj vedení směny.\n\n{ctx[0]['exact']}\n\n{citations}"
 
-{summary}
+    try:
+        r = model_gemini.generate_content(f"Odpověz pouze z textu:\n{combined}")
+        answer = r.text.strip()
+    except:
+        return f"⚠️ Chyba generování.\n\n{ctx[0]['exact']}\n\n{citations}"
 
-**Citace:**
-{citations}
-"""
-
-# =========================
-# UI
-# =========================
-
-st.title("🛡️ VPP Checker")
-st.sidebar.markdown("## 🔐 Administrace")
-
-if not st.session_state.logged:
-    pwd = st.sidebar.text_input("Heslo", type="password")
-    if st.sidebar.button("Přihlásit"):
-        if pwd == st.secrets["ADMIN_PASSWORD"]:
-            st.session_state.logged = True
-            st.rerun()
-else:
-    files = st.sidebar.file_uploader("PDF", accept_multiple_files=True)
-    vpp_name = st.sidebar.text_input("Název VPP")
-    insurer = st.sidebar.text_input("Pojišťovna")
-
-    if st.sidebar.button("Nahrát"):
-        if files and vpp_name and insurer:
-            ingest_pdf(files, vpp_name, insurer)
+    return f"<span class='{conf_class}'>Spolehlivost: {confidence}%</span>\n\n{answer}\n\n{citations}"
 
 # =========================
 # CHAT
 # =========================
+
+st.title("🛡️ VPP Checker")
 
 q = st.chat_input("Zeptej se...")
 
 if q:
     ctx, conf = search(q)
     ans = ask(q, ctx, conf)
+    log_query(q, selected_insurer, selected_vpp, conf)
     st.session_state.history.insert(0, {"q": q, "a": ans})
 
 # =========================
@@ -337,7 +419,6 @@ if q:
 # =========================
 
 for i, h in enumerate(st.session_state.history):
-
     st.markdown(f"<div class='chat-user'>{h['q']}</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='chat-ai'>{h['a']}</div>", unsafe_allow_html=True)
 
