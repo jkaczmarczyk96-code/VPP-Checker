@@ -11,6 +11,7 @@ from datetime import datetime
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import google.generativeai as genai
 
 # =========================
 # CONFIG
@@ -26,20 +27,47 @@ PRIMARY = "#314397"
 ACCENT = "#E43238"
 
 # =========================
-# STYLE (NEZMENĚNO)
+# GEMINI
+# =========================
+
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model_gemini = genai.GenerativeModel("gemini-1.5-flash")
+
+# =========================
+# STYLE (UX FIX)
 # =========================
 
 st.markdown(f"""
 <style>
 body {{ background-color: #f5f7fb; }}
-.header {{ background:{PRIMARY}; padding:20px; border-radius:12px; color:white; margin-bottom:15px; }}
-.chat-user {{ background:#e3edff; color:#1a1a1a; padding:15px; border-radius:12px; margin-top:10px; }}
-.chat-ai {{ background:#ffffff; color:#1a1a1a; padding:15px; border-radius:12px; border-left:5px solid {ACCENT}; margin-top:10px; }}
+
+.header {{
+    background:{PRIMARY};
+    padding:20px;
+    border-radius:12px;
+    color:white;
+}}
+
+.chat-user {{
+    background:#e3edff;
+    padding:15px;
+    border-radius:12px;
+    margin-top:10px;
+}}
+
+.chat-ai {{
+    background:white;
+    padding:15px;
+    border-radius:12px;
+    border-left:5px solid {ACCENT};
+    margin-top:10px;
+}}
+
 </style>
 """, unsafe_allow_html=True)
 
 # =========================
-# SESSION (NEZMENĚNO)
+# SESSION
 # =========================
 
 if "history" not in st.session_state:
@@ -52,7 +80,7 @@ if "logged" not in st.session_state:
     st.session_state.logged = False
 
 # =========================
-# QDRANT (NEZMENĚNO)
+# QDRANT
 # =========================
 
 qdrant = QdrantClient(
@@ -72,7 +100,7 @@ def init_collection():
 init_collection()
 
 # =========================
-# MODEL (NEZMENĚNO)
+# MODEL
 # =========================
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -81,7 +109,7 @@ def embed_batch(texts):
     return model.encode(texts).tolist()
 
 # =========================
-# HEADINGS (NEZMENĚNO)
+# HEADINGS
 # =========================
 
 def detect_headings(text):
@@ -98,7 +126,7 @@ def detect_headings(text):
     return main, sub
 
 # =========================
-# 🆕 EXACT SENTENCE
+# EXACT SENTENCE
 # =========================
 
 def extract_exact_sentence(paragraph, question):
@@ -106,7 +134,6 @@ def extract_exact_sentence(paragraph, question):
 
     best = ""
     best_score = 0
-
     q_words = set(question.lower().split())
 
     for s in sentences:
@@ -120,24 +147,7 @@ def extract_exact_sentence(paragraph, question):
     return best if best else paragraph[:300]
 
 # =========================
-# FEEDBACK (NEZMENĚNO)
-# =========================
-
-def save_feedback(q, a, f, note=""):
-    try:
-        creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            creds_dict,
-            ["https://spreadsheets.google.com/feeds"]
-        )
-        client = gspread.authorize(creds)
-        sheet = client.open("feedback").sheet1
-        sheet.append_row([str(datetime.now()), q, a, f, note])
-    except:
-        st.warning("Feedback se nepodařilo uložit")
-
-# =========================
-# 🔥 INGEST (UPRAVENO NA ODSTAVCE)
+# INGEST (BEZE ZMĚNY)
 # =========================
 
 def ingest_pdf(files):
@@ -160,12 +170,10 @@ def ingest_pdf(files):
                 continue
 
             main, sub = detect_headings(text)
-
             paragraphs = text.split("\n\n")
 
             for para in paragraphs:
                 para = para.strip()
-
                 if len(para) < 50:
                     continue
 
@@ -181,15 +189,7 @@ def ingest_pdf(files):
         done += 1
         progress.progress(done / total)
 
-    if not all_chunks:
-        status.text("❌ Žádný text")
-        return
-
-    status.text("🔄 Vytvářím embeddingy...")
-
     vectors = embed_batch([c["text"] for c in all_chunks])
-
-    status.text("📦 Ukládám...")
 
     points = []
     for c, v in zip(all_chunks, vectors):
@@ -205,7 +205,7 @@ def ingest_pdf(files):
     status.text("✅ Hotovo")
 
 # =========================
-# 🔥 SEARCH (UPRAVENO)
+# SEARCH (TOP 3)
 # =========================
 
 def search(q):
@@ -220,72 +220,128 @@ def search(q):
     if not results:
         return None
 
-    combined_text = []
-    best = results[0].payload
+    contexts = []
 
     for r in results:
-        combined_text.append(r.payload["text"])
+        p = r.payload
+        exact = extract_exact_sentence(p["text"], q)
 
-    exact = extract_exact_sentence(best["text"], q)
+        contexts.append({
+            "text": p["text"],
+            "exact": exact,
+            "page": p["page"],
+            "heading": p.get("heading",""),
+            "subheading": p.get("subheading","")
+        })
 
-    return {
-        "text": "\n".join(combined_text[:3]),
-        "page": best["page"],
-        "source": best["source"],
-        "heading": best.get("heading",""),
-        "subheading": best.get("subheading",""),
-        "exact": exact
-    }
+    return contexts
 
 # =========================
-# 🔥 AI (UPRAVENO)
+# AI (STRUKTUROVANÁ ODPOVĚĎ)
 # =========================
 
-def ask_ai(q, context):
-    url = "https://api-inference.huggingface.co/models/google/flan-t5-base"
-
-    headers = {
-        "Authorization": f"Bearer {st.secrets['HF_API_KEY']}"
-    }
+def ask_ai(q, contexts):
+    combined = "\n\n".join([c["text"] for c in contexts])
 
     prompt = f"""
 Jsi odborník na pojistné podmínky.
 
+Odpověz strukturovaně:
+- krátké shrnutí
+- hlavní body (odrážky)
+
 TEXT:
-{context['text']}
+{combined}
 
 OTÁZKA:
 {q}
 """
 
     try:
-        res = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=20)
-
-        if res.status_code != 200:
-            raise Exception()
-
-        data = res.json()
-
-        if isinstance(data, list):
-            answer = data[0].get("generated_text", "")
-        else:
-            answer = ""
-
+        response = model_gemini.generate_content(prompt)
+        answer = response.text.strip()
     except:
-        answer = context["exact"]
+        answer = contexts[0]["exact"]
 
-    if not answer.strip():
-        answer = "Na základě pojistných podmínek platí následující:"
+    # 🔥 více citací
+    citations = "\n\n".join([
+        f"\"{c['exact']}\"\n(str. {c['page']}, {c['heading']}, {c['subheading']})"
+        for c in contexts[:3]
+    ])
 
     return f"""
 🧠 Odpověď:
-{answer.strip()}
+{answer}
 
 📄 Citace:
-"{context['exact']}"
-(str. {context['page']}, {context['heading']}, {context['subheading']})
+{citations}
 """
 
 # =========================
-# ZBYTEK KÓDU = BEZE ZMĚN
+# UI
 # =========================
+
+st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
+
+# =========================
+# ADMIN (SKRYTÝ)
+# =========================
+
+if not st.session_state.logged:
+    pwd = st.text_input("Admin heslo", type="password")
+
+    if st.button("Přihlásit"):
+        if pwd == st.secrets["ADMIN_PASSWORD"]:
+            st.session_state.logged = True
+            st.success("Přihlášeno")
+
+# ADMIN PANEL až po loginu
+if st.session_state.logged:
+    st.sidebar.markdown("## 📄 Upload PDF")
+
+    files = st.sidebar.file_uploader(
+        "Vyber PDF",
+        accept_multiple_files=True
+    )
+
+    if st.sidebar.button("🚀 Nahrát"):
+        if files:
+            ingest_pdf(files)
+            st.sidebar.success("Hotovo")
+
+# =========================
+# CHAT FLOW (FIX)
+# =========================
+
+q = st.chat_input("Zeptej se...")
+
+if q:
+    # 👉 ihned zobraz dotaz
+    st.session_state.history.append({"q": q, "a": "⏳ Checker hledá..."})
+
+    # 👉 rerender okamžitě
+    st.rerun()
+
+# odpověď AI
+if st.session_state.history and st.session_state.history[0]["a"] == "⏳ Checker hledá...":
+    last = st.session_state.history[0]
+
+    with st.spinner("🔍 Hledám v dokumentech..."):
+        contexts = search(last["q"])
+
+    if contexts:
+        with st.spinner("🤖 Generuji odpověď..."):
+            answer = ask_ai(last["q"], contexts)
+    else:
+        answer = "❌ Nic nenalezeno"
+
+    st.session_state.history[0]["a"] = answer
+    st.rerun()
+
+# =========================
+# RENDER CHAT
+# =========================
+
+for item in st.session_state.history:
+    st.markdown(f"<div class='chat-user'>{item['q']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='chat-ai'>{item['a']}</div>", unsafe_allow_html=True)
