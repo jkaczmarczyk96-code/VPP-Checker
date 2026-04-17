@@ -29,7 +29,7 @@ INSURERS = [
 # =========================
 
 for k, v in {
-    "history": [],
+    "messages": [],
     "feedback": [],
     "feedback_done": {},
     "feedback_open": {},
@@ -57,7 +57,6 @@ def get_client():
     return gspread.authorize(creds)
 
 def save_feedback(q,a,r,n):
-    st.session_state.feedback.append({"question":q,"answer":a,"rating":r,"note":n})
     try:
         get_client().open("VPP_Feedback").worksheet("feedback").append_row(
             [q,a,r,n,"",selected_insurer,selected_vpp]
@@ -154,19 +153,24 @@ def get_vpps(ins):
     return sorted(set(r.payload.get("vpp_name") for r in safe_scroll() if r.payload.get("insurer")==ins))
 
 # =========================
-# SMART MEMORY
+# MEMORY
 # =========================
 
 def get_memory(q):
-    if not st.session_state.history: return ""
+    if not st.session_state.messages:
+        return ""
+
     current = embed_query(q)
-    scored=[]
-    for h in st.session_state.history[:10]:
-        vec = embed_query(h["q"])
-        sim=sum(a*b for a,b in zip(current,vec))
-        scored.append((sim,h))
-    scored=sorted(scored,key=lambda x:x[0],reverse=True)[:2]
-    return "\n".join([f"U:{h['q']} A:{h['a']}" for _,h in scored])
+    scored = []
+
+    for m in st.session_state.messages:
+        if m["role"] == "user":
+            vec = embed_query(m["content"])
+            sim = sum(a*b for a,b in zip(current, vec))
+            scored.append((sim, m["content"]))
+
+    scored = sorted(scored, reverse=True)[:2]
+    return "\n".join([f"U:{x[1]}" for x in scored])
 
 # =========================
 # INGEST
@@ -207,27 +211,40 @@ def ingest_pdf(files,vpp,ins):
     st.session_state["upload_key"]=str(uuid.uuid4())
 
 # =========================
-# SEARCH
+# SEARCH (HYBRID)
 # =========================
+
+def keyword_score(q, text):
+    return len(set(q.lower().split()) & set(text.lower().split()))
 
 def search(q):
     try:
-        vec=embed_query(q)
+        vec = embed_query(q + " pojištění výluky podmínky")
 
-        filt=Filter(must=[
-            FieldCondition(key="insurer",match=MatchValue(value=selected_insurer)),
-            FieldCondition(key="vpp_name",match=MatchValue(value=selected_vpp))
-        ])
+        ins = normalize(selected_insurer)
+        vpp = normalize(selected_vpp)
 
-        res=qdrant.query_points("docs",query=vec,query_filter=filt,limit=10).points
+        filt=None
+        if ins!="— VYBER —" and vpp!="— VYBER —":
+            filt=Filter(must=[
+                FieldCondition(key="insurer",match=MatchValue(value=ins)),
+                FieldCondition(key="vpp_name",match=MatchValue(value=vpp))
+            ])
+
+        res=qdrant.query_points("docs",query=vec,query_filter=filt,limit=25).points
+
+        if not res:
+            res=qdrant.query_points("docs",query=vec,limit=25).points
 
         if not res:
             return [],0
 
-        pairs=[(q,r.payload["text"]) for r in res]
+        enriched=[(r,keyword_score(q,r.payload["text"])) for r in res]
+        pairs=[(q,r.payload["text"]) for r,_ in enriched]
         scores=reranker.predict(pairs)
 
-        ranked=sorted(zip(res,scores),key=lambda x:x[1],reverse=True)
+        final=[(r,s+(kw*0.3)) for (r,kw),s in zip(enriched,scores)]
+        ranked=sorted(final,key=lambda x:x[1],reverse=True)
 
         ctx=[{
             "text":r.payload["text"],
@@ -235,55 +252,11 @@ def search(q):
             "page":r.payload["page"]
         } for r,_ in ranked[:5]]
 
-        conf=int((float(ranked[0][1])+5)*10)
+        conf=int(min(max(ranked[0][1]*20,0),100))
         return ctx,conf
 
     except:
         return [],0
-
-# =========================
-# AI STREAMING
-# =========================
-
-def ask_stream(q, ctx, conf, placeholder):
-    if not ctx:
-        placeholder.markdown("❌ Nenalezeno → kontaktuj vedení směny")
-        return "❌ Nenalezeno → kontaktuj vedení směny"
-
-    memory = get_memory(q)
-    combined = "\n\n".join([c["text"] for c in ctx])
-
-    prompt=f"""
-Shrň odpověď a uveď body.
-
-ODPOVÍDEJ POUZE Z TEXTU.
-
-KONTEXT:
-{memory}
-
-TEXT:
-{combined}
-
-OTÁZKA:
-{q}
-"""
-
-    full=""
-
-    try:
-        response = model_gemini.generate_content(prompt, stream=True)
-        for chunk in response:
-            if chunk.text:
-                full += chunk.text
-                placeholder.markdown(full)
-    except:
-        full = ctx[0]["exact"]
-        placeholder.markdown(full)
-
-    cites="\n".join([f"📄 \"{c['exact']}\" (str. {c['page']})" for c in ctx])
-    final=f"{full}\n\n{cites}"
-    placeholder.markdown(final)
-    return final
 
 # =========================
 # UI
@@ -310,27 +283,68 @@ else:
     if st.sidebar.button("Nahrát"):
         ingest_pdf(f,v,i)
 
-# CHAT INPUT
-q=st.chat_input("Zeptej se...")
+# =========================
+# CHAT
+# =========================
 
-if q and selected_vpp!="— vyber —":
-    st.session_state.history.insert(0,{"q":q,"a":"..."})
-    st.rerun()
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# STREAMING EXECUTION
-if st.session_state.history and st.session_state.history[0]["a"]=="...":
-    last=st.session_state.history[0]
-    placeholder=st.empty()
+if prompt := st.chat_input("Zeptej se..."):
 
-    ctx,conf=search(last["q"])
-    ans=ask_stream(last["q"],ctx,conf,placeholder)
+    st.session_state.messages.append({"role":"user","content":prompt})
 
-    log_query(last["q"],selected_insurer,selected_vpp,conf)
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    st.session_state.history[0]["a"]=ans
-    st.rerun()
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        full = ""
 
-# CHAT BUBBLES
-for h in st.session_state.history:
-    st.markdown(f"<div style='text-align:right'><div style='background:#2b6cb0;color:white;padding:12px;border-radius:16px;max-width:70%'>{h['q']}</div></div>",unsafe_allow_html=True)
-    st.markdown(f"<div style='text-align:left'><div style='background:#f1f5f9;color:#111;padding:12px;border-radius:16px;max-width:70%'>{h['a']}</div></div>",unsafe_allow_html=True)
+        ctx, conf = search(prompt)
+
+        if not ctx:
+            placeholder.markdown("❌ Nenalezeno → kontaktuj vedení směny")
+            full = "❌ Nenalezeno → kontaktuj vedení směny"
+
+        else:
+            memory = get_memory(prompt)
+            combined = "\n\n".join([c["text"] for c in ctx])
+
+            prompt_ai = f"""
+Shrň odpověď a uveď body.
+
+ODPOVÍDEJ POUZE Z TEXTU.
+
+KONTEXT:
+{memory}
+
+TEXT:
+{combined}
+
+OTÁZKA:
+{prompt}
+"""
+
+            stream = model_gemini.generate_content(prompt_ai, stream=True)
+
+            for chunk in stream:
+                if chunk.text:
+                    full += chunk.text
+                    placeholder.markdown(full + "▌")
+
+            cites = "\n".join([
+                f"📄 \"{c['exact']}\" (str. {c['page']})"
+                for c in ctx
+            ])
+
+            full = f"{full}\n\n{cites}"
+            placeholder.markdown(full)
+
+        st.session_state.messages.append({
+            "role":"assistant",
+            "content":full
+        })
+
+        log_query(prompt, selected_insurer, selected_vpp, conf)
