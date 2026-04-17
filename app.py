@@ -7,6 +7,9 @@ import re
 import uuid
 import base64
 from datetime import datetime
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================
 # CONFIG
@@ -63,51 +66,29 @@ def detect_headings(text):
     return main, sub
 
 # =========================
-# GITHUB FEEDBACK
+# GOOGLE SHEETS FEEDBACK
 # =========================
 
-def save_feedback_github(row):
-    token = st.secrets["GITHUB_TOKEN"]
-    repo = st.secrets["GITHUB_REPO"]
+def save_feedback(question, answer, feedback, note=""):
+    scope = ["https://spreadsheets.google.com/feeds"]
 
-    url = f"https://api.github.com/repos/{repo}/contents/feedback.csv"
+    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
 
-    headers = {
-        "Authorization": f"token {token}"
-    }
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        creds_dict, scope
+    )
 
-    res = requests.get(url, headers=headers)
+    client = gspread.authorize(creds)
 
-    if res.status_code == 200:
-        content = base64.b64decode(res.json()["content"]).decode("utf-8")
-        sha = res.json()["sha"]
-    else:
-        content = "time,question,answer,feedback,note\n"
-        sha = None
+    sheet = client.open("feedback").sheet1
 
-    content += ",".join(row) + "\n"
-
-    encoded = base64.b64encode(content.encode()).decode()
-
-    data = {
-        "message": "update feedback",
-        "content": encoded
-    }
-
-    if sha:
-        data["sha"] = sha
-
-    requests.put(url, headers=headers, json=data)
-
-def save_feedback(q, a, f, note=""):
-    row = [
+    sheet.append_row([
         str(datetime.now()),
-        q.replace(",", " "),
-        a.replace(",", " "),
-        f,
-        note.replace(",", " ")
-    ]
-    save_feedback_github(row)
+        question,
+        answer,
+        feedback,
+        note
+    ])
 
 # =========================
 # DB
