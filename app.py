@@ -1,5 +1,3 @@
-# FINAL VERIFIED VERSION (INTEGRITY + OPTIMIZATION CHECKED)
-
 import streamlit as st
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, Filter, FieldCondition, MatchValue
@@ -8,13 +6,10 @@ from pypdf import PdfReader
 import pdfplumber
 import uuid
 import re
-import hashlib
 import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-from functools import lru_cache
-import numpy as np
 
 # =========================
 # CONFIG
@@ -23,8 +18,6 @@ import numpy as np
 st.set_page_config(page_title="VPP Checker", layout="wide")
 
 VECTOR_SIZE = 768
-TOP_K = 20
-FINAL_K = 5
 
 INSURERS = [
     "CZ - GČPOJ","CZ - Direct","CZ - TravelCare","CZ - Uniqa",
@@ -62,7 +55,6 @@ def get_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
     return gspread.authorize(creds)
 
-
 def save_feedback(q,a,r,n):
     st.session_state.feedback.append({
         "question": q,
@@ -77,7 +69,6 @@ def save_feedback(q,a,r,n):
     except:
         pass
 
-
 def log_query(q,ins,vpp,conf):
     try:
         sheet = get_client().open("VPP_Feedback")
@@ -88,17 +79,17 @@ def log_query(q,ins,vpp,conf):
         pass
 
 # =========================
-# ALERTS
+# ALERTY
 # =========================
 
 st.sidebar.markdown("## 🚨 Alerty")
 try:
     sheet = get_client().open("VPP_Feedback").worksheet("feedback")
     data = sheet.get_all_records()
-    recent_bad = [r for r in data[-20:] if r.get("rating") == "dislike"]
+    bad = [r for r in data[-20:] if r.get("rating") == "dislike"]
 
-    if recent_bad:
-        st.sidebar.error(f"⚠️ {len(recent_bad)} negativních feedbacků")
+    if bad:
+        st.sidebar.error(f"⚠️ {len(bad)} negativních feedbacků")
     else:
         st.sidebar.success("✅ Bez problémů")
 except:
@@ -110,10 +101,8 @@ except:
 
 qdrant = QdrantClient(
     url=st.secrets["QDRANT_URL"],
-    api_key=st.secrets["QDRANT_API_KEY"],
-    timeout=3.0
+    api_key=st.secrets["QDRANT_API_KEY"]
 )
-
 
 def init_collection():
     try:
@@ -143,9 +132,7 @@ def load_reranker():
 model = load_model()
 reranker = load_reranker()
 
-@lru_cache(maxsize=10000)
-def embed_cached(text):
-    return model.encode(text).tolist()
+def embed(x): return model.encode(x).tolist()
 
 # =========================
 # HELPERS
@@ -153,25 +140,17 @@ def embed_cached(text):
 
 def normalize(x): return x.strip().upper() if x else ""
 
-
-def smart_chunk(t, s=700, o=120):
+def smart_chunk(t, s=800, o=150):
     out, i = [], 0
     while i < len(t):
         out.append(t[i:i+s])
         i += s-o
     return out
 
-
 def extract_sentence(p,q):
-    s = re.split(r'(?<=[.!?]) +', p)
-    qw = set(q.lower().split())
-    return max(s, key=lambda x: len(qw & set(x.lower().split())), default=p)
-
-
-def cosine_sim(a,b):
-    a,b = np.array(a), np.array(b)
-    return float(a @ b / (np.linalg.norm(a)*np.linalg.norm(b)+1e-9))
-
+    s=re.split(r'(?<=[.!?]) +',p)
+    qw=set(q.lower().split())
+    return max(s,key=lambda x:len(qw & set(x.lower().split())),default=p)
 
 def safe_scroll():
     try:
@@ -179,13 +158,36 @@ def safe_scroll():
     except:
         return []
 
-
 def get_vpps(ins):
-    return sorted(set(r.payload.get("vpp_name") for r in safe_scroll() if r.payload.get("insurer")==ins))
+    return sorted(set(
+        r.payload.get("vpp_name")
+        for r in safe_scroll()
+        if r.payload.get("insurer")==ins
+    ))
 
+# =========================
+# SMART MEMORY
+# =========================
 
-def chunk_hash(text, vpp):
-    return hashlib.md5((text+vpp).encode()).hexdigest()
+def get_relevant_memory(q, top_k=2):
+    if not st.session_state.history:
+        return ""
+
+    current_vec = embed([q])[0]
+    scored = []
+
+    for h in st.session_state.history[:10]:
+        vec = embed([h["q"]])[0]
+        score = sum(a*b for a,b in zip(current_vec, vec))
+        scored.append((score, h))
+
+    scored = sorted(scored, key=lambda x: x[0], reverse=True)[:top_k]
+
+    context = ""
+    for _, h in scored:
+        context += f"Uživatel: {h['q']}\nOdpověď: {h['a']}\n\n"
+
+    return context.strip()
 
 # =========================
 # INGEST
@@ -195,12 +197,10 @@ def ingest_pdf(files,vpp,ins):
     vpp=normalize(vpp)
 
     if not vpp:
-        st.sidebar.error("Zadej VPP")
-        return
+        st.sidebar.error("Zadej VPP"); return
 
     if vpp in get_vpps(ins):
-        st.sidebar.warning("VPP už existuje")
-        return
+        st.sidebar.warning("VPP už existuje"); return
 
     progress=st.sidebar.progress(0)
     status=st.sidebar.empty()
@@ -226,7 +226,7 @@ def ingest_pdf(files,vpp,ins):
             for c in smart_chunk(t):
                 if len(c)<50: continue
                 chunks.append({
-                    "id":chunk_hash(c,vpp),
+                    "id":str(uuid.uuid4()),
                     "text":c,
                     "page":i+1,
                     "vpp_name":vpp,
@@ -237,83 +237,46 @@ def ingest_pdf(files,vpp,ins):
             progress.progress(min(done/total,1))
 
     if not chunks:
-        status.text("❌ PDF chyba")
-        return
+        status.text("❌ PDF chyba"); return
 
     status.text("🔄 Embedding...")
-    vecs=model.encode([c["text"] for c in chunks]).tolist()
+    vec=embed([c["text"] for c in chunks])
 
-    pts=[{"id":c["id"],"vector":v,"payload":c} for c,v in zip(chunks,vecs)]
+    pts=[{"id":c["id"],"vector":v,"payload":c} for c,v in zip(chunks,vec)]
 
     status.text("📦 Ukládám...")
     qdrant.upsert("docs",pts)
     status.text("✅ Hotovo")
 
 # =========================
-# QUERY REWRITE
-# =========================
-
-def rewrite_query(q):
-    try:
-        r=model_gemini.generate_content(f"Upřesni dotaz stručně: {q}")
-        rq=r.text.strip()
-        if len(rq.split())<2:
-            return q
-        return rq
-    except:
-        return q
-
-# =========================
 # SEARCH
 # =========================
 
 def search(q):
-    if selected_vpp=="— vyber —": return [],0
-
     try:
-        q2=rewrite_query(q)
-
-        vec1=embed_cached(q)
-        vec2=embed_cached(q2)
+        vec=embed([q])[0]
 
         filt=Filter(must=[
             FieldCondition(key="insurer",match=MatchValue(value=selected_insurer)),
             FieldCondition(key="vpp_name",match=MatchValue(value=selected_vpp))
         ])
 
-        res1=qdrant.query_points("docs",query=vec1,query_filter=filt,limit=TOP_K).points
-        res2=qdrant.query_points("docs",query=vec2,query_filter=filt,limit=TOP_K).points
+        res=qdrant.query_points("docs",query=vec,query_filter=filt,limit=10).points
 
-        res=res1+res2
         if not res: return [],0
-
-        uniq={}
-        for r in res:
-            uniq[r.payload["text"][:100]]=r
-        res=list(uniq.values())
 
         pairs=[(q,r.payload["text"]) for r in res]
         scores=reranker.predict(pairs)
 
-        ranked=list(zip(res,scores))
-
-        for i,(r,s) in enumerate(ranked):
-            for fb in st.session_state.feedback:
-                sim=cosine_sim(embed_cached(q),embed_cached(fb["question"]))
-                if sim>0.7:
-                    if fb["rating"]=="like": s+=0.3*sim
-                    elif fb["rating"]=="dislike": s-=0.5*sim
-            ranked[i]=(r,s)
-
-        ranked=sorted(ranked,key=lambda x:x[1],reverse=True)
+        ranked=sorted(zip(res,scores),key=lambda x:x[1],reverse=True)
 
         ctx=[{
             "text":r.payload["text"],
-            "exact":extract_sentence(r.payload["text"],q2),
+            "exact":extract_sentence(r.payload["text"],q),
             "page":r.payload["page"]
-        } for r,_ in ranked[:FINAL_K]]
+        } for r,_ in ranked[:5]]
 
-        conf=int(min(max(ranked[0][1]*20,0),100))
+        conf=int((float(ranked[0][1])+5)*10)
 
         return ctx,conf
 
@@ -332,18 +295,16 @@ def ask(q,ctx,conf):
         return "❌ Nenalezeno → kontaktuj vedení směny"
 
     combined="\n\n".join([c["text"] for c in ctx])
+    memory=get_relevant_memory(q)
 
     prompt=f"""
-Jsi asistent pro práci s pojistnými podmínkami (VPP).
+Shrň odpověď a uveď body.
 
-PRAVIDLA:
-- Odpovídej POUZE z textu
-- NIC si nevymýšlej
-- Pokud odpověď není → napiš: "Nelze najít v dokumentu"
+ODPOVÍDEJ POUZE Z TEXTU.
+Nevymýšlej.
 
-STRUKTURA:
-1. Krátké shrnutí
-2. Body
+KONTEXT:
+{memory}
 
 TEXT:
 {combined}
@@ -356,11 +317,11 @@ OTÁZKA:
         r=model_gemini.generate_content(prompt)
         answer=r.text.strip()
     except:
-        answer=ctx[0]["exact"] if ctx else ""
+        answer=ctx[0]["exact"]
 
-    cites="\n".join([f"📄 \"{c['exact']}\" (strana {c['page']})" for c in ctx]) if ctx else ""
+    cites="\n".join([f"📄 \"{c['exact']}\" (str. {c['page']})" for c in ctx])
 
-    return f"{answer}\n\n---\n{cites}\n\n📊 Confidence: {conf}%"
+    return f"{answer}\n\n{cites}\n\n📊 Confidence: {conf}%"
 
 # =========================
 # UI
@@ -374,8 +335,7 @@ selected_insurer=st.sidebar.selectbox("Pojišťovna",["— vyber —"]+INSURERS)
 
 selected_vpp="— vyber —"
 if selected_insurer!="— vyber —":
-    vpps=get_vpps(selected_insurer)
-    selected_vpp=st.sidebar.selectbox("VPP",["— vyber —"]+vpps)
+    selected_vpp=st.sidebar.selectbox("VPP",["— vyber —"]+get_vpps(selected_insurer))
 
 # ADMIN
 if not st.session_state.logged:
@@ -405,28 +365,7 @@ if q:
         log_query(q,selected_insurer,selected_vpp,conf)
         st.session_state.history.insert(0,{"q":q,"a":ans})
 
+# BUBBLES
 for i,h in enumerate(st.session_state.history):
-    st.markdown(f"**Ty:** {h['q']}")
-    st.markdown(f"**AI:** {h['a']}")
-
-    if st.session_state.feedback_done.get(i):
-        st.success("Díky!")
-        continue
-
-    c1,c2=st.columns(2)
-
-    if c1.button("👍",key=f"l{i}"):
-        save_feedback(h["q"],h["a"],"like","")
-        st.session_state.feedback_done[i]=True
-        st.rerun()
-
-    if c2.button("👎",key=f"d{i}"):
-        st.session_state.feedback_open[i]=True
-
-    if st.session_state.feedback_open.get(i):
-        note=st.text_input("Co bylo špatně?",key=f"n{i}")
-        if st.button("Odeslat",key=f"s{i}"):
-            save_feedback(h["q"],h["a"],"dislike",note)
-            st.session_state.feedback_done[i]=True
-            st.session_state.feedback_open[i]=False
-            st.rerun()
+    st.markdown(f"<div style='text-align:right'><div style='background:#e3edff;padding:10px;border-radius:10px'>{h['q']}</div></div>",unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:left'><div style='background:white;padding:10px;border-radius:10px;border-left:4px solid #314397'>{h['a']}</div></div>",unsafe_allow_html=True)
