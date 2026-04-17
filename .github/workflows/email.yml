@@ -1,0 +1,24 @@
+name: Send Feedback
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # pondělí 8:00
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.seznam.cz
+          server_port: 465
+          username: ${{ secrets.EMAIL }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: VPP Checker – Feedback report
+          to: j.kaczmarczyk@seznam.cz
+          from: VPP Checker
+          secure: true
+          attachments: feedback.csv
