@@ -7,7 +7,6 @@ import pdfplumber
 import uuid
 import re
 import google.generativeai as genai
-from datetime import datetime
 
 # =========================
 # CONFIG
@@ -23,7 +22,24 @@ INSURERS = [
 ]
 
 # =========================
-# INIT QDRANT (FIX DIMENSION)
+# SESSION INIT (FIX)
+# =========================
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "logged" not in st.session_state:
+    st.session_state.logged = False
+
+# =========================
+# GEMINI
+# =========================
+
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model_gemini = genai.GenerativeModel("gemini-1.5-flash")
+
+# =========================
+# QDRANT (DIM FIX)
 # =========================
 
 qdrant = QdrantClient(
@@ -114,7 +130,6 @@ def ingest_pdf(files, vpp, ins):
 
     total_pages = sum(len(PdfReader(f).pages) for f in files)
     done = 0
-
     chunks = []
 
     for f in files:
@@ -149,7 +164,7 @@ def ingest_pdf(files, vpp, ins):
             progress.progress(min(done / total_pages, 1.0))
 
     if not chunks:
-        status.text("❌ PDF error")
+        status.text("❌ PDF chyba")
         return
 
     status.text("🔄 Embedding...")
@@ -252,9 +267,6 @@ if selected_insurer != "— vyber —":
     )
 
 st.sidebar.markdown("## 🔐 Administrace")
-
-if "logged" not in st.session_state:
-    st.session_state.logged = False
 
 if not st.session_state.logged:
     pwd = st.sidebar.text_input("Heslo", type="password")
