@@ -106,29 +106,18 @@ def save_feedback(q, a, rating, note=""):
 
     try:
         get_feedback_sheet().append_row([
-            q,
-            a,
-            rating,
-            note,
-            error_type,
-            selected_insurer,
-            selected_vpp
+            q, a, rating, note, error_type,
+            selected_insurer, selected_vpp
         ])
     except:
         pass
 
 # =========================
-# LOGGING + ANALYTICS
+# LOGGING
 # =========================
 
 def log_query(q, insurer, vpp, confidence):
     timestamp = str(datetime.now())
-    log_key = f"{q}_{timestamp}"
-
-    if st.session_state.get("last_logged") == log_key:
-        return
-
-    st.session_state["last_logged"] = log_key
 
     try:
         get_logs_sheet().append_row([timestamp, q, insurer, vpp, confidence])
@@ -154,7 +143,7 @@ def check_alerts():
         for r in rows:
             if r.get("rating") == "dislike":
                 q = r.get("q")
-                vpp = r.get("vpp", "unknown")
+                vpp = r.get("vpp")
 
                 if q:
                     query_counts[q] = query_counts.get(q, 0) + 1
@@ -165,7 +154,6 @@ def check_alerts():
         bad_vpps = [v for v, c in vpp_counts.items() if c >= 5]
 
         return bad_queries, bad_vpps
-
     except:
         return [], []
 
@@ -261,7 +249,7 @@ def ingest_pdf(files, vpp_name, insurer):
     qdrant.upsert("docs", points)
 
 # =========================
-# FILTR + ALERTS
+# FILTR
 # =========================
 
 st.sidebar.markdown("## 📂 Filtr dokumentů")
@@ -289,7 +277,10 @@ if selected_insurer != "— vyber —":
 else:
     selected_vpp = None
 
-# 🔐 ADMIN + ALERTY
+# =========================
+# ADMIN + ALERTY
+# =========================
+
 st.sidebar.markdown("## 🔐 Administrace")
 
 if not st.session_state.logged:
@@ -307,7 +298,6 @@ else:
         if files and vpp_name and insurer:
             ingest_pdf(files, vpp_name, insurer)
 
-    # ALERTY
     bad_q, bad_v = check_alerts()
 
     if bad_q or bad_v:
