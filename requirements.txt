@@ -3,3 +3,4 @@ qdrant-client
 sentence-transformers
 pypdf
 requests
+torch
