@@ -33,7 +33,7 @@ st.markdown(f"""
 <style>
 .header {{background:{PRIMARY};padding:20px;border-radius:12px;color:white;}}
 .chat-user {{background:#eef2ff;padding:15px;border-radius:12px;margin-top:10px;}}
-.chat-ai {{background:white;padding:15px;border-radius:12px;border-left:5px solid {ACCENT};margin-top:10px;}}
+.chat-ai {{background:white; color:black; padding:15px;border-radius:12px;border-left:5px solid {ACCENT};margin-top:10px;}}
 .source {{background:#f9f9f9;padding:10px;border-radius:8px;margin-top:5px;border-left:3px solid {PRIMARY};}}
 .highlight {{background:#fff3cd;padding:5px;border-radius:5px;}}
 </style>
