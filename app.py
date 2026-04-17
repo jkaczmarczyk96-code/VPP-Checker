@@ -76,33 +76,6 @@ def init_collection():
 init_collection()
 
 # =========================
-# HEALTH CHECK
-# =========================
-
-def health_check():
-    status = {}
-
-    try:
-        qdrant.get_collection("docs")
-        status["Qdrant"] = "🟢 OK"
-    except:
-        status["Qdrant"] = "🔴 ERROR"
-
-    try:
-        _ = model_gemini.generate_content("test")
-        status["Gemini"] = "🟢 OK"
-    except:
-        status["Gemini"] = "🔴 ERROR"
-
-    status["Session"] = "🟢 OK" if "history" in st.session_state else "🔴 ERROR"
-
-    return status
-
-if DEBUG:
-    st.markdown("### 🧪 Health check")
-    st.json(health_check())
-
-# =========================
 # MODEL (CACHE FIX)
 # =========================
 
@@ -144,6 +117,27 @@ def process_text(file, text, page):
             "source": file
         })
     return chunks
+
+# =========================
+# 🔥 EXACT SENTENCE (NEW)
+# =========================
+
+def extract_exact_sentence(paragraph, question):
+    sentences = re.split(r'(?<=[.!?]) +', paragraph)
+
+    best = ""
+    best_score = 0
+    q_words = set(question.lower().split())
+
+    for s in sentences:
+        s_words = set(s.lower().split())
+        score = len(q_words & s_words)
+
+        if score > best_score:
+            best_score = score
+            best = s
+
+    return best if best else paragraph[:300]
 
 # =========================
 # INGEST
@@ -191,7 +185,7 @@ def ingest_pdf(files):
     st.success("✅ Hotovo")
 
 # =========================
-# SEARCH
+# SEARCH (UPDATED)
 # =========================
 
 def search(q):
@@ -207,17 +201,24 @@ def search(q):
 
     ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
 
-    return [
-        {
-            "text": r.payload["text"],
-            "page": r.payload["page"],
+    contexts = []
+
+    for r, s in ranked[:5]:
+        p = r.payload
+
+        exact = extract_exact_sentence(p["text"], q)
+
+        contexts.append({
+            "text": p["text"],
+            "exact": exact,
+            "page": p["page"],
             "score": float(s)
-        }
-        for r, s in ranked[:5]
-    ]
+        })
+
+    return contexts
 
 # =========================
-# AI
+# AI (RESTORED CORRECT VERSION)
 # =========================
 
 def ask(q, ctx):
@@ -225,7 +226,7 @@ def ask(q, ctx):
         return "❌ Odpověď není v dokumentech dostupná."
 
     combined = "\n\n---\n\n".join([
-        f"[Strana {c['page']}]\n{c['text']}"
+        f"[Strana {c['page']}]\n{c['exact']}"
         for c in ctx
     ])
 
@@ -255,7 +256,7 @@ DOTAZ:
         r = model_gemini.generate_content(prompt)
         return r.text.strip()
     except:
-        return ctx[0]["text"][:300]
+        return ctx[0]["exact"]
 
 # =========================
 # UI
@@ -263,7 +264,6 @@ DOTAZ:
 
 st.title("🛡️ VPP Checker")
 
-# LOGIN (FIX TEXT)
 if not st.session_state.logged:
     st.sidebar.info("🔒 Přihlas se pro upload PDF")
 
@@ -283,7 +283,7 @@ else:
 
     if st.sidebar.button("Nahrát"):
         if files:
-            with st.spinner("📄 Zpracovávám PDF..."):  # FIX
+            with st.spinner("📄 Zpracovávám PDF..."):
                 ingest_pdf(files)
                 st.session_state.files = {f.name: True for f in files}
 
@@ -294,7 +294,7 @@ else:
 q = st.chat_input("Zeptej se...")
 
 if q:
-    with st.spinner("🔍 Hledám odpověď..."):  # FIX
+    with st.spinner("🔍 Hledám odpověď..."):
         ctx = search(q)
         ans = ask(q, ctx)
 
