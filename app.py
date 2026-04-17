@@ -19,6 +19,8 @@ import time
 # CONFIG
 # =========================
 
+VECTOR_SIZE = 768  # 🔥 FIX
+
 st.set_page_config(
     page_title="VPP Checker",
     layout="wide",
@@ -40,19 +42,6 @@ def load_gemini():
     return genai.GenerativeModel("gemini-1.5-flash")
 
 model_gemini = load_gemini()
-
-# =========================
-# STYLE
-# =========================
-
-st.markdown(f"""
-<style>
-body {{ background-color: #f5f7fb; }}
-.header {{ background:{PRIMARY}; padding:20px; border-radius:12px; color:white; }}
-.chat-user {{ background:#e3edff; padding:15px; border-radius:12px; margin-top:10px; }}
-.chat-ai {{ background:white; padding:15px; border-radius:12px; border-left:5px solid {ACCENT}; margin-top:10px; }}
-</style>
-""", unsafe_allow_html=True)
 
 # =========================
 # SESSION
@@ -78,11 +67,20 @@ qdrant = QdrantClient(
 
 def init_collection():
     try:
-        qdrant.get_collection("docs")
+        info = qdrant.get_collection("docs")
+
+        current_size = info.config.params.vectors.size
+
+        if current_size != VECTOR_SIZE:
+            print("⚠️ Dimenze nesedí → mažu kolekci")
+            qdrant.delete_collection("docs")
+
+            raise Exception("recreate")
+
     except:
         qdrant.create_collection(
             collection_name="docs",
-            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
         )
 
 init_collection()
@@ -137,23 +135,6 @@ def extract_with_pdfplumber(file):
     return texts
 
 # =========================
-# HEADINGS
-# =========================
-
-def detect_headings(text):
-    lines = text.split("\n")
-    main, sub = "", ""
-
-    for line in lines:
-        line = line.strip()
-        if line.isupper() and len(line) > 5:
-            main = line
-        elif re.match(r'^\d+(\.\d+)*\s', line):
-            sub = line
-
-    return main, sub
-
-# =========================
 # CHUNKING
 # =========================
 
@@ -172,7 +153,6 @@ def process_text_to_chunks(file_name, text, page_num):
     if not text:
         return []
 
-    main, sub = detect_headings(text)
     paragraphs = smart_chunk(text)
 
     chunks = []
@@ -185,15 +165,13 @@ def process_text_to_chunks(file_name, text, page_num):
             "id": str(uuid.uuid4()),
             "text": para[:1500],
             "page": page_num,
-            "source": file_name,
-            "heading": main,
-            "subheading": sub
+            "source": file_name
         })
 
     return chunks
 
 # =========================
-# INGEST (WITH PROGRESS)
+# INGEST
 # =========================
 
 def ingest_pdf(files):
@@ -215,11 +193,7 @@ def ingest_pdf(files):
         reader = PdfReader(file)
         plumber_data = None
 
-        total_pages = len(reader.pages)
-
         for i, page in enumerate(reader.pages):
-            status.text(f"📄 {file.name} | strana {i+1}/{total_pages}")
-
             text = safe_extract_text_pypdf(page, i+1, file.name)
 
             if not text:
@@ -242,7 +216,7 @@ def ingest_pdf(files):
     status.text("🔄 Embedding...")
     vectors = embed_batch(tuple([c["text"] for c in all_chunks]))
 
-    status.text("📦 Ukládám do databáze...")
+    status.text("📦 Ukládám...")
 
     points = []
     for c, v in zip(all_chunks, vectors):
@@ -256,111 +230,6 @@ def ingest_pdf(files):
 
     progress.progress(1.0)
     status.text("✅ Hotovo")
-
-# =========================
-# QUERY REWRITE
-# =========================
-
-def rewrite_query(user_q, history):
-    try:
-        r = model_gemini.generate_content(f"Přeformuluj dotaz: {user_q}")
-        return r.text.strip()
-    except:
-        return user_q
-
-# =========================
-# SEARCH
-# =========================
-
-def search_cached(q):
-    vector = embed_batch((q,))[0]
-
-    detected_source = None
-    for f in st.session_state.files:
-        if f.lower() in q.lower():
-            detected_source = f
-
-    query_filter = None
-    if detected_source:
-        query_filter = Filter(
-            must=[FieldCondition(
-                key="source",
-                match=MatchValue(value=detected_source)
-            )]
-        )
-
-    results = qdrant.query_points(
-        collection_name="docs",
-        query=vector,
-        limit=10,
-        query_filter=query_filter
-    ).points
-
-    if not results:
-        return None
-
-    pairs = [(q, r.payload["text"]) for r in results]
-    scores = reranker.predict(pairs)
-
-    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
-
-    contexts = []
-
-    for r, score in ranked[:5]:
-        p = r.payload
-
-        contexts.append({
-            "text": p["text"],
-            "page": p["page"],
-            "score": float(score)
-        })
-
-    return contexts
-
-# =========================
-# CONFIDENCE
-# =========================
-
-def compute_confidence(contexts, query):
-    if not contexts:
-        return 0
-
-    return min(max(sum([c["score"] for c in contexts]) / len(contexts), 0), 1)
-
-# =========================
-# REASONING
-# =========================
-
-def build_reasoning_plan(q):
-    try:
-        r = model_gemini.generate_content(f"Rozděl otázku na kroky: {q}")
-        return r.text.strip()
-    except:
-        return ""
-
-# =========================
-# AI
-# =========================
-
-def ask_ai_stream(q, contexts):
-    if not contexts:
-        return "❌ Nic nenalezeno"
-
-    plan = build_reasoning_plan(q)
-
-    combined = "\n\n".join([c["text"] for c in contexts])
-
-    try:
-        response = model_gemini.generate_content(f"{plan}\n\n{combined}\n\n{q}")
-        answer = response.text.strip()
-    except:
-        answer = contexts[0]["text"][:200]
-
-    confidence = int(compute_confidence(contexts, q) * 100)
-
-    st.markdown(f"🧠 {answer}\n\n📊 Jistota: {confidence}%")
-
-    return answer
 
 # =========================
 # UI
@@ -390,16 +259,3 @@ else:
             ingest_pdf(files)
             st.session_state.files = {f.name: True for f in files}
             st.sidebar.success("Hotovo")
-
-q = st.chat_input("Zeptej se...")
-
-if q:
-    better_q = rewrite_query(q, st.session_state.history)
-    contexts = search_cached(better_q)
-    answer = ask_ai_stream(q, contexts)
-
-    st.session_state.history.insert(0, {"q": q, "a": answer})
-
-for item in st.session_state.history:
-    st.markdown(f"<div class='chat-user'>{item['q']}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='chat-ai'>{item['a']}</div>", unsafe_allow_html=True)
