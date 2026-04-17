@@ -5,6 +5,7 @@ from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 import re
 import base64
+import uuid  # 🔥 nový import
 
 # 🧠 MODEL
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -15,7 +16,7 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-# 🔥 NOVÁ KOLEKCE (stabilní)
+# 🔥 NOVÁ KOLEKCE
 collection = "docs_v3"
 
 try:
@@ -56,7 +57,7 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 📥 INGEST
+# 📥 INGEST (FIXED)
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
@@ -71,7 +72,6 @@ def ingest_pdf(file):
 
         for j, chunk in enumerate(chunks):
 
-            # 🔥 ochrana proti prázdnému textu
             if not chunk or len(chunk.strip()) < 20:
                 continue
 
@@ -79,7 +79,7 @@ def ingest_pdf(file):
                 qdrant.upsert(
                     collection_name=collection,
                     points=[{
-                        "id": f"{file.name}_{i}_{j}",
+                        "id": str(uuid.uuid4()),  # 🔥 HLAVNÍ FIX
                         "vector": embed(chunk),
                         "payload": {
                             "text": chunk,
