@@ -3,24 +3,23 @@ name: Send Feedback
 on:
   schedule:
     - cron: "0 8 * * 1"
-
-  workflow_dispatch:   # 👈 TOHLE PŘIDEJ
+  workflow_dispatch:
 
 jobs:
   send:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: dawidd6/action-send-mail@v3
+      - uses: dawidd6/action-send-mail@v4
         with:
-          server_address: smtp.seznam.cz
+          server_address: smtp.gmail.com
           server_port: 465
           username: ${{ secrets.EMAIL }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: VPP Checker – Feedback report
-          to: tvuj@email.seznam.cz
+          to: j.kaczmarczyk@seznam.cz
           from: VPP Checker
           secure: true
           attachments: feedback.csv
