@@ -39,8 +39,14 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # =========================
-# LOGIN
+# SESSION
 # =========================
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "files" not in st.session_state:
+    st.session_state.files = {}
 
 if "logged" not in st.session_state:
     st.session_state.logged = False
@@ -51,8 +57,7 @@ if "logged" not in st.session_state:
 
 def detect_headings(text):
     lines = text.split("\n")
-    main = ""
-    sub = ""
+    main, sub = "", ""
 
     for line in lines:
         line = line.strip()
@@ -66,29 +71,27 @@ def detect_headings(text):
     return main, sub
 
 # =========================
-# GOOGLE SHEETS FEEDBACK
+# GOOGLE FEEDBACK
 # =========================
 
-def save_feedback(question, answer, feedback, note=""):
-    scope = ["https://spreadsheets.google.com/feeds"]
+def save_feedback(q, a, f, note=""):
+    try:
+        scope = ["https://spreadsheets.google.com/feeds"]
 
-    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+        creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        creds_dict, scope
-    )
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            creds_dict, scope
+        )
 
-    client = gspread.authorize(creds)
+        client = gspread.authorize(creds)
+        sheet = client.open("feedback").sheet1
 
-    sheet = client.open("feedback").sheet1
-
-    sheet.append_row([
-        str(datetime.now()),
-        question,
-        answer,
-        feedback,
-        note
-    ])
+        sheet.append_row([
+            str(datetime.now()), q, a, f, note
+        ])
+    except:
+        st.warning("Feedback se nepodařilo uložit")
 
 # =========================
 # DB
@@ -101,49 +104,77 @@ qdrant = QdrantClient(
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-def embed(text):
-    return model.encode(text).tolist()
+def embed_batch(texts):
+    return model.encode(texts).tolist()
 
 # =========================
-# PDF
+# PDF INGEST (RYCHLÝ + MULTI)
 # =========================
 
-def show_pdf(file, page):
-    file.seek(0)
-    base64_pdf = base64.b64encode(file.read()).decode("utf-8")
+def ingest_pdf(files):
+    all_points = []
 
-    st.markdown(f"""
-    <iframe src="data:application/pdf;base64,{base64_pdf}#page={page}"
-    width="100%" height="500"></iframe>
-    """, unsafe_allow_html=True)
+    for file in files:
+        reader = PdfReader(file)
 
-def ingest_pdf(file):
-    reader = PdfReader(file)
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if not text:
+                continue
 
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if not text:
-            continue
+            main, sub = detect_headings(text)
+            chunks = re.split(r'(?<=[.!?]) +', text)
 
-        main, sub = detect_headings(text)
-
-        chunks = re.split(r'(?<=[.!?]) +', text)
-
-        for chunk in chunks:
-            qdrant.upsert(
-                collection_name="docs",
-                points=[{
+            for chunk in chunks:
+                all_points.append({
                     "id": str(uuid.uuid4()),
-                    "vector": embed(chunk),
-                    "payload": {
-                        "text": chunk,
-                        "page": i+1,
-                        "source": file.name,
-                        "heading": main,
-                        "subheading": sub
-                    }
-                }]
-            )
+                    "text": chunk[:1000],
+                    "page": i+1,
+                    "source": file.name,
+                    "heading": main,
+                    "subheading": sub
+                })
+
+    # batch embed
+    vectors = embed_batch([p["text"] for p in all_points])
+
+    points = []
+    for p, v in zip(all_points, vectors):
+        points.append({
+            "id": p["id"],
+            "vector": v,
+            "payload": p
+        })
+
+    qdrant.upsert(collection_name="docs", points=points)
+
+# =========================
+# SEARCH
+# =========================
+
+def search(q):
+    vector = embed_batch([q])[0]
+
+    results = qdrant.query_points(
+        collection_name="docs",
+        query=vector,
+        limit=5
+    ).points
+
+    contexts, sources = [], []
+
+    for r in results:
+        payload = r.payload
+
+        contexts.append(
+            f"[str. {payload['page']}] {payload['text']} "
+            f"(Nadpis: {payload.get('heading','')}, "
+            f"Podnadpis: {payload.get('subheading','')})"
+        )
+
+        sources.append(payload)
+
+    return contexts, sources
 
 # =========================
 # AI
@@ -180,40 +211,16 @@ OTÁZKA:
     return res.json()[0]["generated_text"]
 
 # =========================
-# SEARCH
+# PDF VIEW
 # =========================
 
-def search(q):
-    results = qdrant.query_points(
-        collection_name="docs",
-        query=embed(q),
-        limit=5
-    ).points
-
-    contexts = []
-    sources = []
-
-    for r in results:
-        contexts.append(
-            f"[str. {r.payload['page']}] {r.payload['text']} "
-            f"(Nadpis: {r.payload.get('heading','')}, "
-            f"Podnadpis: {r.payload.get('subheading','')})"
-        )
-        sources.append(r.payload)
-
-    answer = ask_ai(q, contexts)
-
-    return answer, sources
-
-# =========================
-# SESSION
-# =========================
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-if "files" not in st.session_state:
-    st.session_state.files = {}
+def show_pdf(file, page):
+    file.seek(0)
+    b64 = base64.b64encode(file.read()).decode()
+    st.markdown(
+        f'<iframe src="data:application/pdf;base64,{b64}#page={page}" width="100%" height="500"></iframe>',
+        unsafe_allow_html=True
+    )
 
 # =========================
 # HEADER
@@ -222,7 +229,7 @@ if "files" not in st.session_state:
 st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
 
 # =========================
-# SIDEBAR
+# SIDEBAR (ADMIN)
 # =========================
 
 st.sidebar.markdown("### 🔐 Admin")
@@ -235,35 +242,41 @@ if st.sidebar.button("Přihlásit"):
         st.sidebar.success("OK")
 
 if st.session_state.logged:
-    file = st.sidebar.file_uploader("Nahraj PDF")
+    files = st.sidebar.file_uploader(
+        "Nahraj PDF",
+        accept_multiple_files=True
+    )
 
-    if file:
-        st.session_state.files[file.name] = file
-        ingest_pdf(file)
+    if files:
+        for f in files:
+            st.session_state.files[f.name] = f
+
+        ingest_pdf(files)
         st.sidebar.success("Nahráno")
 
 # =========================
-# INPUT
+# CHAT INPUT
 # =========================
 
 q = st.chat_input("Zeptej se...")
 
 if q:
-    answer, sources = search(q)
+    contexts, sources = search(q)
+    answer = ask_ai(q, contexts)
 
     st.session_state.history.append({
-        "question": q,
-        "answer": answer,
+        "q": q,
+        "a": answer,
         "sources": sources
     })
 
 # =========================
-# CHAT
+# CHAT UI
 # =========================
 
 for i, item in enumerate(reversed(st.session_state.history)):
-    st.markdown(f"<div class='chat-user'>{item['question']}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='chat-ai'>{item['answer']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='chat-user'>{item['q']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='chat-ai'>{item['a']}</div>", unsafe_allow_html=True)
 
     for j, s in enumerate(item["sources"]):
         st.markdown(f"""
@@ -282,9 +295,9 @@ for i, item in enumerate(reversed(st.session_state.history)):
     col1, col2 = st.columns(2)
 
     if col1.button("👍", key=f"like{i}"):
-        save_feedback(item["question"], item["answer"], "like")
+        save_feedback(item["q"], item["a"], "like")
 
     if col2.button("👎", key=f"dislike{i}"):
         note = st.text_input("Co bylo špatně?", key=f"note{i}")
         if st.button("Odeslat", key=f"send{i}"):
-            save_feedback(item["question"], item["answer"], "dislike", note)
+            save_feedback(item["q"], item["a"], "dislike", note)
