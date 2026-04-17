@@ -1,4 +1,4 @@
-import streamlit as st
+(import streamlit as st
 import requests
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -6,66 +6,67 @@ from pypdf import PdfReader
 import re
 import uuid
 
-# 🔐 QDRANT
 qdrant = QdrantClient(
     url=st.secrets["QDRANT_URL"],
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-collection = "docs"
-
-# 🧠 EMBEDDING (lehčí model)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def embed(text):
     return model.encode(text).tolist()
 
-# ✂️ CHUNKING
 def split_text(text):
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    return sentences
+    return re.split(r'(?<=[.!?]) +', text)
 
-# 📥 NAHRÁNÍ PDF
 def ingest_pdf(file):
     reader = PdfReader(file)
-
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
         if not text:
             continue
 
-        chunks = split_text(text)
-
-        for chunk in chunks:
+        for chunk in split_text(text):
             qdrant.upsert(
-                collection_name=collection,
+                collection_name="docs",
                 points=[{
                     "id": str(uuid.uuid4()),
                     "vector": embed(chunk),
                     "payload": {
                         "text": chunk,
-                        "page": i + 1,
+                        "page": i+1,
                         "source": file.name
                     }
                 }]
             )
 
-# 🔍 DOTAZ NA BACKEND
-def ask_backend(question, contexts):
-    url = "https://vpp-checker.onrender.com/ask"
+def ask_ai(question, contexts):
+    url = "https://api-inference.huggingface.co/models/google/flan-t5-large"
 
-    res = requests.post(url, json={
-        "question": question,
-        "contexts": contexts
-    })
+    headers = {
+        "Authorization": f"Bearer {st.secrets['HF_API_KEY']}"
+    }
 
-    return res.json()["answer"]
+    prompt = f"""
+Jsi odborník na pojistné podmínky.
 
-# 🔍 SEARCH
-def search(question):
+Odpovídej pouze z textu.
+
+TEXT:
+{chr(10).join(contexts)}
+
+OTÁZKA:
+{question}
+"""
+
+    res = requests.post(url, headers=headers, json={"inputs": prompt})
+
+    return res.json()[0]["generated_text"]
+
+def search(q):
     results = qdrant.query_points(
-        collection_name=collection,
-        query=embed(question),
+        collection_name="docs",
+        query=embed(q),
         limit=5
     ).points
 
@@ -73,29 +74,24 @@ def search(question):
     sources = []
 
     for r in results:
-        text = r.payload["text"]
-        page = r.payload["page"]
-
-        contexts.append(f"[str. {page}] {text}")
+        contexts.append(f"[str. {r.payload['page']}] {r.payload['text']}")
         sources.append(r.payload)
 
-    answer = ask_backend(question, contexts)
+    answer = ask_ai(q, contexts)
 
     return answer, sources
 
-# 🎨 UI
 st.title("🛡️ VPP Checker")
 
 pwd = st.sidebar.text_input("Heslo", type="password")
 
 if pwd == st.secrets["ADMIN_PASSWORD"]:
     file = st.sidebar.file_uploader("Nahraj PDF")
-
     if file:
         ingest_pdf(file)
-        st.sidebar.success("Nahráno")
+        st.sidebar.success("Hotovo")
 
-q = st.text_input("Zeptej se")
+q = st.text_input("Dotaz")
 
 if st.button("Odeslat") and q:
     answer, sources = search(q)
@@ -104,3 +100,4 @@ if st.button("Odeslat") and q:
 
     for s in sources:
         st.write(f"{s['source']} – str. {s['page']}")
+)
