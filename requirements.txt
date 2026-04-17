@@ -5,3 +5,4 @@ pypdf
 requests
 gspread
 oauth2client
+google-generativeai
