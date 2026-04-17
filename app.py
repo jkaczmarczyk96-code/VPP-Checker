@@ -64,18 +64,14 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 📥 INGEST
+# 📥 INGEST (vrací počet chunků)
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
 
     count = 0
-    progress = st.progress(0)
 
-    pages = reader.pages
-    total = len(pages)
-
-    for i, page in enumerate(pages):
+    for i, page in enumerate(reader.pages):
         text = page.extract_text()
 
         if not text or len(text.strip()) < 30:
@@ -104,12 +100,7 @@ def ingest_pdf(file):
             except:
                 pass
 
-        progress.progress((i + 1) / total)
-
-    if count > 0:
-        st.success(f"✅ PDF nahráno ({count} částí)")
-    else:
-        st.error("❌ PDF se nepodařilo nahrát")
+    return count
 
 # 🧠 BEST SENTENCE
 def best_sentence(text, question, q_emb):
@@ -137,7 +128,7 @@ def get_documents():
     res = qdrant.scroll(collection_name=collection, limit=1000)
     return list({p.payload["source"] for p in res[0]})
 
-# 🔍 SEARCH (FIXED)
+# 🔍 SEARCH
 def search(question, doc_filter=None):
     q_emb = embed(question)
 
@@ -152,7 +143,7 @@ def search(question, doc_filter=None):
         query=q_emb,
         query_filter=query_filter,
         limit=5
-    ).points  # 🔥 FIX
+    ).points
 
     answer_parts = []
     sources = []
@@ -210,12 +201,32 @@ if st.sidebar.button("🗑️ Vymazat historii"):
 
 pwd = st.sidebar.text_input("Admin heslo", type="password")
 
+# 🔥 MULTI UPLOAD
 if pwd == st.secrets["ADMIN_PASSWORD"]:
-    file = st.sidebar.file_uploader("Nahraj PDF", type="pdf")
+    files = st.sidebar.file_uploader(
+        "Nahraj PDF",
+        type="pdf",
+        accept_multiple_files=True
+    )
 
-    if file and st.sidebar.button("Nahrát"):
-        ingest_pdf(file)
+    if files and st.sidebar.button("Nahrát všechny"):
+        progress = st.progress(0)
 
+        total_files = len(files)
+        total_chunks = 0
+
+        for idx, file in enumerate(files):
+            st.sidebar.write(f"📄 {file.name}")
+            chunks = ingest_pdf(file)
+            total_chunks += chunks
+
+            progress.progress((idx + 1) / total_files)
+
+        st.sidebar.success(
+            f"✅ Nahráno {total_files} souborů ({total_chunks} částí)"
+        )
+
+# 📂 FILTER
 docs = get_documents()
 selected_doc = st.sidebar.selectbox("Filtr dokumentu", ["Vše"] + docs)
 
@@ -250,5 +261,8 @@ for item in reversed(st.session_state.history):
         """, unsafe_allow_html=True)
 
         if src in st.session_state.files:
-            if st.button(f"Otevřít {src} str. {page}", key=f"{src}-{page}-{sentence[:10]}"):
+            if st.button(
+                f"Otevřít {src} str. {page}",
+                key=f"{src}-{page}-{sentence[:10]}"
+            ):
                 show_pdf(st.session_state.files[src], page)
