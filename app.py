@@ -2,51 +2,77 @@ import streamlit as st
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 from pypdf import PdfReader
 import re
 import base64
 import uuid
 
-# ⚡ CACHE MODEL
+# =========================
+# 🧠 MODELY
+# =========================
+
 @st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def load_embedding_model():
+    return SentenceTransformer("intfloat/multilingual-e5-base")
 
-model = load_model()
+@st.cache_resource
+def load_llm():
+    return pipeline(
+        "text2text-generation",
+        model="google/flan-t5-base",
+        max_length=512
+    )
 
-# 🔐 DB
+embed_model = load_embedding_model()
+llm = load_llm()
+
+# =========================
+# 🔐 QDRANT
+# =========================
+
 qdrant = QdrantClient(
     url=st.secrets["QDRANT_URL"],
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-collection = "docs_v5"
+collection = "docs_v7"
 
 try:
     qdrant.get_collection(collection)
 except:
     qdrant.create_collection(
         collection_name=collection,
-        vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
     )
 
+# =========================
 # 💬 SESSION
+# =========================
+
 if "history" not in st.session_state:
     st.session_state.history = []
 
 if "files" not in st.session_state:
     st.session_state.files = {}
 
-# ⚡ EMBEDDING (rychlý batch pro search)
-@st.cache_data(show_spinner=False)
-def embed_cached(text):
-    vec = model.encode(text)
+# =========================
+# 🧠 EMBEDDING
+# =========================
+
+def embed_passages(texts):
+    texts = [f"passage: {t}" for t in texts]
+    vectors = embed_model.encode(texts)
+    return [[float(x) for x in v] for v in vectors]
+
+def embed_query(text):
+    vec = embed_model.encode([f"query: {text}"])[0]
     return [float(x) for x in vec]
 
-def embed(text):
-    return embed_cached(text)
-
+# =========================
 # ✂️ CHUNKING
+# =========================
+
 def split_text(text, chunk_size=400):
     sentences = re.split(r'(?<=[.!?]) +', text)
     chunks = []
@@ -64,7 +90,10 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 🚀 FAST INGEST (batch)
+# =========================
+# 🚀 INGEST (FAST)
+# =========================
+
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
@@ -72,7 +101,6 @@ def ingest_pdf(file):
     all_chunks = []
     metadata = []
 
-    # načtení textu
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
 
@@ -94,15 +122,13 @@ def ingest_pdf(file):
     if not all_chunks:
         return 0
 
-    # ⚡ BATCH EMBEDDING (hlavní zrychlení)
-    embeddings = model.encode(all_chunks)
+    embeddings = embed_passages(all_chunks)
 
-    # ⚡ připrav body
     points = []
     for i, emb in enumerate(embeddings):
         points.append({
             "id": str(uuid.uuid4()),
-            "vector": [float(x) for x in emb],
+            "vector": emb,
             "payload": {
                 "text": all_chunks[i],
                 "source": metadata[i]["source"],
@@ -110,7 +136,6 @@ def ingest_pdf(file):
             }
         })
 
-    # ⚡ BATCH UPSERT (méně requestů)
     batch_size = 50
     for i in range(0, len(points), batch_size):
         qdrant.upsert(
@@ -120,35 +145,37 @@ def ingest_pdf(file):
 
     return len(points)
 
-# 🧠 BEST SENTENCE
-def best_sentence(text, question, q_emb):
-    sentences = re.split(r'(?<=[.!?]) +', text)
+# =========================
+# 🧠 LLM ODPOVĚĎ
+# =========================
 
-    best = ""
-    best_score = -1
+def generate_llm_answer(question, contexts):
+    context_text = "\n\n".join(contexts[:3])
 
-    for s in sentences:
-        if len(s) < 20:
-            continue
+    prompt = f"""
+Odpověz na otázku pouze na základě textu.
 
-        s_emb = embed(s)
-        score = sum(a*b for a, b in zip(s_emb, q_emb))
+Používej citace [str. X].
+Nevymýšlej si informace.
 
-        if score > best_score:
-            best_score = score
-            best = s
+Text:
+{context_text}
 
-    return best.strip()
+Otázka:
+{question}
 
-# 📂 CACHE dokumentů
-@st.cache_data
-def get_documents():
-    res = qdrant.scroll(collection_name=collection, limit=1000)
-    return list({p.payload["source"] for p in res[0]})
+Odpověď:
+"""
 
+    result = llm(prompt)[0]["generated_text"]
+    return result
+
+# =========================
 # 🔍 SEARCH
+# =========================
+
 def search(question, doc_filter=None):
-    q_emb = embed(question)
+    q_emb = embed_query(question)
 
     query_filter = None
     if doc_filter and doc_filter != "Vše":
@@ -163,21 +190,25 @@ def search(question, doc_filter=None):
         limit=5
     ).points
 
-    answer_parts = []
+    contexts = []
     sources = []
 
     for r in results:
-        sentence = best_sentence(r.payload["text"], question, q_emb)
+        text = r.payload["text"]
+        page = r.payload["page"]
+        source = r.payload["source"]
 
-        if sentence:
-            answer_parts.append(
-                f"{sentence} <span style='color:#E43238'>[str. {r.payload['page']}]</span>"
-            )
-            sources.append((r.payload["source"], r.payload["page"], sentence))
+        contexts.append(f"[str. {page}] {text}")
+        sources.append((source, page))
 
-    return " ".join(answer_parts[:3]), sources
+    answer = generate_llm_answer(question, contexts)
 
+    return answer, sources
+
+# =========================
 # 📄 PDF VIEW
+# =========================
+
 def show_pdf(file, page):
     file.seek(0)
     base64_pdf = base64.b64encode(file.read()).decode("utf-8")
@@ -187,7 +218,10 @@ def show_pdf(file, page):
     width="100%" height="600"></iframe>
     """, unsafe_allow_html=True)
 
+# =========================
 # 🎨 DESIGN
+# =========================
+
 PRIMARY = "#314397"
 ACCENT = "#E43238"
 
@@ -203,7 +237,6 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# HEADER
 st.markdown("""
 <div class="header">
 <h2>🛡️ VPP Checker</h2>
@@ -211,7 +244,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# =========================
 # SIDEBAR
+# =========================
+
 st.sidebar.markdown("### 📊 Ovládání")
 
 if st.sidebar.button("🗑️ Vymazat historii"):
@@ -219,7 +255,6 @@ if st.sidebar.button("🗑️ Vymazat historii"):
 
 pwd = st.sidebar.text_input("Admin heslo", type="password")
 
-# 🔥 MULTI UPLOAD + FAST INGEST
 if pwd == st.secrets["ADMIN_PASSWORD"]:
     files = st.sidebar.file_uploader(
         "Nahraj PDF",
@@ -244,11 +279,22 @@ if pwd == st.secrets["ADMIN_PASSWORD"]:
             f"✅ Nahráno {total_files} souborů ({total_chunks} částí)"
         )
 
-# 📂 FILTER
+# =========================
+# FILTER
+# =========================
+
+@st.cache_data
+def get_documents():
+    res = qdrant.scroll(collection_name=collection, limit=1000)
+    return list({p.payload["source"] for p in res[0]})
+
 docs = get_documents()
 selected_doc = st.sidebar.selectbox("Filtr dokumentu", ["Vše"] + docs)
 
+# =========================
 # DOTAZ
+# =========================
+
 st.markdown("### 🔍 Zadej dotaz")
 q = st.text_input("")
 
@@ -261,7 +307,10 @@ if st.button("Odeslat") and q:
         "sources": sources
     })
 
+# =========================
 # HISTORIE
+# =========================
+
 for item in reversed(st.session_state.history):
     st.markdown(f"""
     <div class="card">
@@ -270,17 +319,16 @@ for item in reversed(st.session_state.history):
     </div>
     """, unsafe_allow_html=True)
 
-    for src, page, sentence in item["sources"]:
+    for src, page in item["sources"]:
         st.markdown(f"""
         <div class="source">
-        <b>{src}</b> – str. {page}<br>
-        <span class="highlight">{sentence}</span>
+        <b>{src}</b> – str. {page}
         </div>
         """, unsafe_allow_html=True)
 
         if src in st.session_state.files:
             if st.button(
                 f"Otevřít {src} str. {page}",
-                key=f"{src}-{page}-{sentence[:10]}"
+                key=f"{src}-{page}"
             ):
                 show_pdf(st.session_state.files[src], page)
