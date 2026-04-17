@@ -103,11 +103,19 @@ if DEBUG:
     st.json(health_check())
 
 # =========================
-# MODEL
+# MODEL (CACHE FIX)
 # =========================
 
-model = SentenceTransformer("intfloat/multilingual-e5-base")
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("intfloat/multilingual-e5-base")
+
+@st.cache_resource
+def load_reranker():
+    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+model = load_model()
+reranker = load_reranker()
 
 # =========================
 # HELPERS
@@ -225,21 +233,15 @@ def ask(q, ctx):
         return ctx[0]["text"][:200]
 
 # =========================
-# UI GUARD
-# =========================
-
-if "history" not in st.session_state:
-    st.error("❌ Session error")
-    st.stop()
-
-# =========================
 # UI
 # =========================
 
 st.title("🛡️ VPP Checker")
 
-# LOGIN
+# LOGIN (FIX TEXT)
 if not st.session_state.logged:
+    st.sidebar.info("🔒 Přihlas se pro upload PDF")
+
     pwd = st.sidebar.text_input("Heslo", type="password")
 
     if st.sidebar.button("Přihlásit"):
@@ -256,8 +258,9 @@ else:
 
     if st.sidebar.button("Nahrát"):
         if files:
-            ingest_pdf(files)
-            st.session_state.files = {f.name: True for f in files}
+            with st.spinner("📄 Zpracovávám PDF..."):  # FIX
+                ingest_pdf(files)
+                st.session_state.files = {f.name: True for f in files}
 
 # =========================
 # CHAT
@@ -266,8 +269,9 @@ else:
 q = st.chat_input("Zeptej se...")
 
 if q:
-    ctx = search(q)
-    ans = ask(q, ctx)
+    with st.spinner("🔍 Hledám odpověď..."):  # FIX
+        ctx = search(q)
+        ans = ask(q, ctx)
 
     st.session_state.history.insert(0, {"q": q, "a": ans})
 
