@@ -1,9 +1,10 @@
 import streamlit as st
 import requests
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance
-from sentence_transformers import SentenceTransformer
+from qdrant_client.models import VectorParams, Distance, Filter, FieldCondition, MatchValue
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from pypdf import PdfReader
+import pdfplumber
 import re
 import uuid
 import base64
@@ -12,7 +13,6 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
-import concurrent.futures
 import time
 
 # =========================
@@ -31,7 +31,7 @@ PRIMARY = "#314397"
 ACCENT = "#E43238"
 
 # =========================
-# GEMINI (CACHE)
+# GEMINI
 # =========================
 
 @st.cache_resource
@@ -88,22 +88,53 @@ def init_collection():
 init_collection()
 
 # =========================
-# MODEL (CACHE)
+# MODEL
 # =========================
 
 @st.cache_resource
 def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    return SentenceTransformer("intfloat/multilingual-e5-base")
 
 model = load_model()
 
+@st.cache_resource
+def load_reranker():
+    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+reranker = load_reranker()
+
 # =========================
-# EMBEDDING (CACHE)
+# EMBEDDING
 # =========================
 
 @st.cache_data(show_spinner=False)
 def embed_batch(texts_tuple):
     return model.encode(list(texts_tuple)).tolist()
+
+# =========================
+# SAFE PDF EXTRACT
+# =========================
+
+def safe_extract_text_pypdf(page, page_num, file_name):
+    try:
+        return page.extract_text()
+    except Exception as e:
+        print(f"[pypdf FAIL] {file_name} | strana {page_num}: {e}")
+        return None
+
+def extract_with_pdfplumber(file):
+    texts = []
+    try:
+        with pdfplumber.open(file) as pdf:
+            for i, page in enumerate(pdf.pages):
+                try:
+                    text = page.extract_text()
+                    texts.append((i, text))
+                except:
+                    texts.append((i, None))
+    except:
+        pass
+    return texts
 
 # =========================
 # HEADINGS
@@ -123,49 +154,37 @@ def detect_headings(text):
     return main, sub
 
 # =========================
-# EXACT SENTENCE
+# CHUNKING
 # =========================
 
-def extract_exact_sentence(paragraph, question):
-    sentences = re.split(r'(?<=[.!?]) +', paragraph)
+def smart_chunk(text, chunk_size=800, overlap=150):
+    chunks = []
+    start = 0
 
-    best = ""
-    best_score = 0
-    q_words = set(question.lower().split())
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
 
-    for s in sentences:
-        s_words = set(s.lower().split())
-        score = len(q_words & s_words)
+    return chunks
 
-        if score > best_score:
-            best_score = score
-            best = s
-
-    return best if best else paragraph[:300]
-
-# =========================
-# PARALELNÍ INGEST
-# =========================
-
-def process_page(file_name, page, i):
-    text = page.extract_text()
+def process_text_to_chunks(file_name, text, page_num):
     if not text:
         return []
 
     main, sub = detect_headings(text)
-    paragraphs = text.split("\n\n")
+    paragraphs = smart_chunk(text)
 
     chunks = []
 
     for para in paragraphs:
-        para = para.strip()
         if len(para) < 50:
             continue
 
         chunks.append({
             "id": str(uuid.uuid4()),
             "text": para[:1500],
-            "page": i+1,
+            "page": page_num,
             "source": file_name,
             "heading": main,
             "subheading": sub
@@ -173,45 +192,32 @@ def process_page(file_name, page, i):
 
     return chunks
 
+# =========================
+# INGEST
+# =========================
 
 def ingest_pdf(files):
     all_chunks = []
 
-    progress = st.progress(0)
-    status = st.empty()
-
-    total_files = len(files)
-    done_files = 0
-
     for file in files:
-
         if file.name in st.session_state.files:
             continue
 
-        status.text(f"Zpracovávám: {file.name}")
-
         reader = PdfReader(file)
+        plumber_data = None
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(process_page, file.name, page, i)
-                for i, page in enumerate(reader.pages)
-            ]
+        for i, page in enumerate(reader.pages):
+            text = safe_extract_text_pypdf(page, i+1, file.name)
 
-            for f in concurrent.futures.as_completed(futures):
-                all_chunks.extend(f.result())
+            if not text:
+                if plumber_data is None:
+                    plumber_data = extract_with_pdfplumber(file)
+                _, text = plumber_data[i]
 
-        done_files += 1
-        progress.progress(done_files / total_files)
-
-    if not all_chunks:
-        return
-
-    status.text("🔄 Embedding...")
+            chunks = process_text_to_chunks(file.name, text, i+1)
+            all_chunks.extend(chunks)
 
     vectors = embed_batch(tuple([c["text"] for c in all_chunks]))
-
-    status.text("📦 Ukládám...")
 
     points = []
     for c, v in zip(all_chunks, vectors):
@@ -223,65 +229,153 @@ def ingest_pdf(files):
 
     qdrant.upsert(collection_name="docs", points=points)
 
-    progress.progress(1.0)
-    status.text("✅ Hotovo")
-
 # =========================
-# SEARCH (CACHE)
+# QUERY REWRITE
 # =========================
 
-@st.cache_data(show_spinner=False)
+def rewrite_query(user_q, history):
+    history_text = "\n".join([
+        f"Q: {h['q']}\nA: {h['a']}"
+        for h in history[:3]
+    ])
+
+    prompt = f"""
+Přeformuluj dotaz pro vyhledávání.
+
+{history_text}
+
+Dotaz:
+{user_q}
+"""
+
+    try:
+        r = model_gemini.generate_content(prompt)
+        return r.text.strip()
+    except:
+        return user_q
+
+# =========================
+# SEARCH + FILTER + RERANK
+# =========================
+
 def search_cached(q):
     vector = embed_batch((q,))[0]
+
+    detected_source = None
+    for f in st.session_state.files:
+        if f.lower() in q.lower():
+            detected_source = f
+
+    query_filter = None
+    if detected_source:
+        query_filter = Filter(
+            must=[FieldCondition(
+                key="source",
+                match=MatchValue(value=detected_source)
+            )]
+        )
 
     results = qdrant.query_points(
         collection_name="docs",
         query=vector,
-        limit=3
+        limit=10,
+        query_filter=query_filter
     ).points
 
     if not results:
         return None
 
+    pairs = [(q, r.payload["text"]) for r in results]
+    scores = reranker.predict(pairs)
+
+    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
+
     contexts = []
 
-    for r in results:
+    for r, score in ranked[:5]:
         p = r.payload
-        exact = extract_exact_sentence(p["text"], q)
 
         contexts.append({
             "text": p["text"],
-            "exact": exact,
+            "exact": p["text"][:300],
             "page": p["page"],
             "heading": p.get("heading",""),
-            "subheading": p.get("subheading","")
+            "subheading": p.get("subheading",""),
+            "score": float(score)
         })
 
     return contexts
 
 # =========================
-# AI (STREAMING + PRAVIDLA)
+# CONFIDENCE
+# =========================
+
+def compute_confidence(contexts, query):
+    if not contexts:
+        return 0
+
+    scores = []
+    q_words = set(query.lower().split())
+
+    for c in contexts:
+        text_words = set(c["text"].lower().split())
+        overlap = len(q_words & text_words) / (len(q_words) + 1)
+        scores.append(0.7 * c["score"] + 0.3 * overlap)
+
+    return min(max(sum(scores)/len(scores), 0), 1)
+
+# =========================
+# REASONING PLAN
+# =========================
+
+def build_reasoning_plan(q, contexts):
+    preview = "\n\n".join([c["text"][:300] for c in contexts[:2]])
+
+    prompt = f"""
+Rozděl otázku na kroky.
+
+Otázka: {q}
+"""
+
+    try:
+        r = model_gemini.generate_content(prompt)
+        return r.text.strip()
+    except:
+        return ""
+
+# =========================
+# AI
 # =========================
 
 def ask_ai_stream(q, contexts):
-    combined = "\n\n".join([c["text"] for c in contexts])
+    if not contexts:
+        return "❌ Nic nenalezeno"
+
+    plan = build_reasoning_plan(q, contexts)
+
+    history_text = "\n".join([
+        f"{h['q']} -> {h['a']}"
+        for h in st.session_state.history[1:4]
+    ])
+
+    combined = "\n\n---\n\n".join([
+        f"[Strana {c['page']}]\n{c['text']}"
+        for c in contexts
+    ])
 
     prompt = f"""
-Jsi odborník na pojistné podmínky.
+Jsi expert na pojistné podmínky.
 
-DŮLEŽITÉ:
-- odpovídej pouze z poskytnutého textu
-- nic si nevymýšlej
-- pokud odpověď v textu není, napiš že není k dispozici
+Použij plán:
+{plan}
 
-Odpověz strukturovaně:
-- krátké shrnutí
-- hlavní body (odrážky)
+Konverzace:
+{history_text}
 
-TEXT:
+Text:
 {combined}
 
-OTÁZKA:
+Otázka:
 {q}
 """
 
@@ -289,24 +383,19 @@ OTÁZKA:
         response = model_gemini.generate_content(prompt)
         full_answer = response.text.strip()
     except:
-        full_answer = contexts[0]["exact"]
+        full_answer = contexts[0]["text"][:300]
 
-    placeholder = st.empty()
-    streamed = ""
-
-    for word in full_answer.split():
-        streamed += word + " "
-        placeholder.markdown(f"🧠 Odpověď:\n\n{streamed}")
-        time.sleep(0.01)
+    confidence = int(compute_confidence(contexts, q) * 100)
 
     citations = "\n\n".join([
-        f"\"{c['exact']}\"\n(str. {c['page']}, {c['heading']}, {c['subheading']})"
-        for c in contexts[:3]
+        f"\"{c['text'][:200]}\" (str. {c['page']})"
+        for c in contexts
     ])
 
-    placeholder.markdown(f"""
-🧠 Odpověď:
-{full_answer}
+    st.markdown(f"""
+🧠 {full_answer}
+
+📊 Jistota: {confidence} %
 
 📄 Citace:
 {citations}
@@ -315,7 +404,7 @@ OTÁZKA:
     return full_answer
 
 # =========================
-# UI + SIDEBAR (ZACHOVÁNO)
+# UI
 # =========================
 
 st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
@@ -331,44 +420,23 @@ if st.sidebar.button("Přihlásit"):
     else:
         st.sidebar.error("Špatné heslo")
 
-if not st.session_state.logged:
-    st.sidebar.info("🔒 Přihlas se pro upload PDF")
-
 if st.session_state.logged:
     files = st.sidebar.file_uploader("📄 Vyber PDF", accept_multiple_files=True)
 
     if st.sidebar.button("🚀 Nahrát"):
         if files:
             ingest_pdf(files)
+            st.session_state.files = {f.name: True for f in files}
             st.sidebar.success("Hotovo")
-
-# =========================
-# CHAT FLOW
-# =========================
 
 q = st.chat_input("Zeptej se...")
 
 if q:
-    st.session_state.history.insert(0, {"q": q, "a": "⏳ Checker hledá..."})
-    st.rerun()
+    better_q = rewrite_query(q, st.session_state.history)
+    contexts = search_cached(better_q)
+    answer = ask_ai_stream(q, contexts)
 
-if st.session_state.history and st.session_state.history[0]["a"] == "⏳ Checker hledá...":
-    last = st.session_state.history[0]
-
-    with st.spinner("🔍 Prohledávám dokumenty..."):
-        contexts = search_cached(last["q"])
-
-    if contexts:
-        with st.spinner("🤖 Checker přemýšlí..."):
-            answer = ask_ai_stream(last["q"], contexts)
-    else:
-        answer = "❌ Nic nenalezeno"
-
-    st.session_state.history[0]["a"] = answer
-
-# =========================
-# RENDER CHAT
-# =========================
+    st.session_state.history.insert(0, {"q": q, "a": answer})
 
 for item in st.session_state.history:
     st.markdown(f"<div class='chat-user'>{item['q']}</div>", unsafe_allow_html=True)
