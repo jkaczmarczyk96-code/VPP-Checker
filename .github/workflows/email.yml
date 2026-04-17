@@ -2,7 +2,9 @@ name: Send Feedback
 
 on:
   schedule:
-    - cron: "0 8 * * 1"  # pondělí 8:00
+    - cron: "0 8 * * 1"
+
+  workflow_dispatch:   # 👈 TOHLE PŘIDEJ
 
 jobs:
   send:
@@ -18,7 +20,7 @@ jobs:
           username: ${{ secrets.EMAIL }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: VPP Checker – Feedback report
-          to: j.kaczmarczyk@seznam.cz
+          to: tvuj@email.seznam.cz
           from: VPP Checker
           secure: true
           attachments: feedback.csv
