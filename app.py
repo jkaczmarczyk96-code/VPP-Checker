@@ -284,23 +284,29 @@ OTÁZKA:
 st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
 
 # =========================
-# ADMIN (SKRYTÝ)
+# SIDEBAR (OPRAVA)
 # =========================
 
+st.sidebar.markdown("## 🔐 Admin panel")
+
+# LOGIN je zpět v sidebaru
+pwd = st.sidebar.text_input("Heslo", type="password")
+
+if st.sidebar.button("Přihlásit"):
+    if pwd == st.secrets["ADMIN_PASSWORD"]:
+        st.session_state.logged = True
+        st.sidebar.success("Přihlášeno")
+    else:
+        st.sidebar.error("Špatné heslo")
+
+# INFO pro nepřihlášené
 if not st.session_state.logged:
-    pwd = st.text_input("Admin heslo", type="password")
+    st.sidebar.info("🔒 Přihlas se pro upload PDF")
 
-    if st.button("Přihlásit"):
-        if pwd == st.secrets["ADMIN_PASSWORD"]:
-            st.session_state.logged = True
-            st.success("Přihlášeno")
-
-# ADMIN PANEL až po loginu
+# UPLOAD (jen po loginu)
 if st.session_state.logged:
-    st.sidebar.markdown("## 📄 Upload PDF")
-
     files = st.sidebar.file_uploader(
-        "Vyber PDF",
+        "📄 Vyber PDF",
         accept_multiple_files=True
     )
 
@@ -308,7 +314,9 @@ if st.session_state.logged:
         if files:
             ingest_pdf(files)
             st.sidebar.success("Hotovo")
-
+        else:
+            st.sidebar.warning("Vyber soubory")
+            
 # =========================
 # CHAT FLOW (FIX)
 # =========================
