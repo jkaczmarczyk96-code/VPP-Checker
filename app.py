@@ -20,7 +20,7 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-collection = "docs_v4"
+collection = "docs_v5"
 
 try:
     qdrant.get_collection(collection)
@@ -37,7 +37,7 @@ if "history" not in st.session_state:
 if "files" not in st.session_state:
     st.session_state.files = {}
 
-# ⚡ CACHE EMBEDDING
+# ⚡ EMBEDDING (rychlý batch pro search)
 @st.cache_data(show_spinner=False)
 def embed_cached(text):
     vec = model.encode(text)
@@ -64,13 +64,15 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 📥 INGEST (vrací počet chunků)
+# 🚀 FAST INGEST (batch)
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
 
-    count = 0
+    all_chunks = []
+    metadata = []
 
+    # načtení textu
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
 
@@ -83,24 +85,40 @@ def ingest_pdf(file):
             if not chunk or len(chunk.strip()) < 20:
                 continue
 
-            try:
-                qdrant.upsert(
-                    collection_name=collection,
-                    points=[{
-                        "id": str(uuid.uuid4()),
-                        "vector": embed(chunk),
-                        "payload": {
-                            "text": chunk,
-                            "source": file.name,
-                            "page": i + 1
-                        }
-                    }]
-                )
-                count += 1
-            except:
-                pass
+            all_chunks.append(chunk)
+            metadata.append({
+                "source": file.name,
+                "page": i + 1
+            })
 
-    return count
+    if not all_chunks:
+        return 0
+
+    # ⚡ BATCH EMBEDDING (hlavní zrychlení)
+    embeddings = model.encode(all_chunks)
+
+    # ⚡ připrav body
+    points = []
+    for i, emb in enumerate(embeddings):
+        points.append({
+            "id": str(uuid.uuid4()),
+            "vector": [float(x) for x in emb],
+            "payload": {
+                "text": all_chunks[i],
+                "source": metadata[i]["source"],
+                "page": metadata[i]["page"]
+            }
+        })
+
+    # ⚡ BATCH UPSERT (méně requestů)
+    batch_size = 50
+    for i in range(0, len(points), batch_size):
+        qdrant.upsert(
+            collection_name=collection,
+            points=points[i:i+batch_size]
+        )
+
+    return len(points)
 
 # 🧠 BEST SENTENCE
 def best_sentence(text, question, q_emb):
@@ -122,7 +140,7 @@ def best_sentence(text, question, q_emb):
 
     return best.strip()
 
-# 📂 DOCUMENTS CACHE
+# 📂 CACHE dokumentů
 @st.cache_data
 def get_documents():
     res = qdrant.scroll(collection_name=collection, limit=1000)
@@ -201,7 +219,7 @@ if st.sidebar.button("🗑️ Vymazat historii"):
 
 pwd = st.sidebar.text_input("Admin heslo", type="password")
 
-# 🔥 MULTI UPLOAD
+# 🔥 MULTI UPLOAD + FAST INGEST
 if pwd == st.secrets["ADMIN_PASSWORD"]:
     files = st.sidebar.file_uploader(
         "Nahraj PDF",
