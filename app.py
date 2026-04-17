@@ -52,7 +52,7 @@ def ingest_pdf(file):
 
 # 🔍 DOTAZ NA BACKEND
 def ask_backend(question, contexts):
-    url = "https://TVŮJ-RENDER-URL.onrender.com/ask"
+    url = "https://vpp-checker.onrender.com/ask"
 
     res = requests.post(url, json={
         "question": question,
