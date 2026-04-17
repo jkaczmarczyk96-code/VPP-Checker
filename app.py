@@ -222,15 +222,40 @@ def search(q):
 
 def ask(q, ctx):
     if not ctx:
-        return "❌ Nic nenalezeno"
+        return "❌ Odpověď není v dokumentech dostupná."
 
-    combined = "\n\n".join([c["text"] for c in ctx])
+    combined = "\n\n---\n\n".join([
+        f"[Strana {c['page']}]\n{c['text']}"
+        for c in ctx
+    ])
+
+    prompt = f"""
+Jsi expert na pojistné podmínky.
+
+PRAVIDLA:
+- odpovídej POUZE z textu
+- nic si nevymýšlej
+- pokud odpověď není v textu → napiš "není k dispozici"
+- odpověď musí dávat smysl jako vysvětlení pro člověka
+- nepřepisuj jen text, vysvětluj
+
+FORMÁT:
+1. Krátké shrnutí (1–2 věty)
+2. Vysvětlení (odrážky)
+3. Citace (přesná věta z textu)
+
+TEXT:
+{combined}
+
+DOTAZ:
+{q}
+"""
 
     try:
-        r = model_gemini.generate_content(f"{combined}\n\n{q}")
-        return r.text
+        r = model_gemini.generate_content(prompt)
+        return r.text.strip()
     except:
-        return ctx[0]["text"][:200]
+        return ctx[0]["text"][:300]
 
 # =========================
 # UI
