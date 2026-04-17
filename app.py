@@ -15,7 +15,7 @@ qdrant = QdrantClient(
 
 collection = "docs"
 
-# vytvoření kolekce (jen jednou)
+# vytvoření kolekce
 try:
     qdrant.get_collection(collection)
 except:
@@ -24,14 +24,26 @@ except:
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
     )
 
-# embedding
+# 🧠 EMBEDDING S RETRY
 def embed(text):
-    return client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    ).data[0].embedding
+    for attempt in range(5):
+        try:
+            return client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text[:1500]  # kratší text
+            ).data[0].embedding
 
-# 📥 upload PDF (opravený)
+        except Exception as e:
+            if "RateLimit" in str(e):
+                wait = 2 + attempt * 2
+                st.warning(f"⏳ Čekám {wait}s kvůli limitu...")
+                time.sleep(wait)
+            else:
+                raise e
+
+    raise Exception("Embedding selhal")
+
+# 📥 INGEST PDF
 def ingest_pdf(file):
     reader = PdfReader(file)
     total_pages = len(reader.pages)
@@ -46,15 +58,19 @@ def ingest_pdf(file):
         if not text or len(text.strip()) < 20:
             continue
 
-        # ✂️ zkrácení textu
+        # ✂️ limit textu
         text = text[:2000]
 
-        # 🔁 kontrola duplicity
         point_id = f"{file.name}_{i}"
 
+        # 🔁 kontrola duplicity
         try:
-            qdrant.retrieve(collection_name=collection, ids=[point_id])
-            continue  # už existuje
+            existing = qdrant.retrieve(
+                collection_name=collection,
+                ids=[point_id]
+            )
+            if existing:
+                continue
         except:
             pass
 
@@ -72,16 +88,16 @@ def ingest_pdf(file):
             }]
         )
 
-        # ⏳ zpomalení (PROTI RATE LIMIT)
-        time.sleep(1)
+        # ⏳ zpomalení
+        time.sleep(2)
 
-        # 📊 progress bar
+        # 📊 progress
         progress.progress((i + 1) / total_pages)
         status.text(f"Zpracovávám stránku {i+1}/{total_pages}")
 
     status.text("Hotovo ✅")
 
-# 🔍 dotaz
+# 🔍 DOTAZ
 def search(question):
     results = qdrant.search(
         collection_name=collection,
