@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 import re
@@ -52,6 +53,35 @@ if "logged" not in st.session_state:
     st.session_state.logged = False
 
 # =========================
+# QDRANT INIT (FIX ERROR)
+# =========================
+
+qdrant = QdrantClient(
+    url=st.secrets["QDRANT_URL"],
+    api_key=st.secrets["QDRANT_API_KEY"]
+)
+
+def init_collection():
+    try:
+        qdrant.get_collection("docs")
+    except:
+        qdrant.create_collection(
+            collection_name="docs",
+            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        )
+
+init_collection()
+
+# =========================
+# MODEL
+# =========================
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def embed_batch(texts):
+    return model.encode(texts).tolist()
+
+# =========================
 # HEADINGS
 # =========================
 
@@ -64,7 +94,6 @@ def detect_headings(text):
 
         if line.isupper() and len(line) > 5:
             main = line
-
         elif re.match(r'^\d+(\.\d+)*\s', line):
             sub = line
 
@@ -76,43 +105,26 @@ def detect_headings(text):
 
 def save_feedback(q, a, f, note=""):
     try:
-        scope = ["https://spreadsheets.google.com/feeds"]
-
         creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
 
         creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            creds_dict, scope
+            creds_dict,
+            ["https://spreadsheets.google.com/feeds"]
         )
 
         client = gspread.authorize(creds)
         sheet = client.open("feedback").sheet1
 
-        sheet.append_row([
-            str(datetime.now()), q, a, f, note
-        ])
+        sheet.append_row([str(datetime.now()), q, a, f, note])
     except:
         st.warning("Feedback se nepodařilo uložit")
 
 # =========================
-# DB
-# =========================
-
-qdrant = QdrantClient(
-    url=st.secrets["QDRANT_URL"],
-    api_key=st.secrets["QDRANT_API_KEY"]
-)
-
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-def embed_batch(texts):
-    return model.encode(texts).tolist()
-
-# =========================
-# PDF INGEST (RYCHLÝ + MULTI)
+# INGEST (MULTI + FAST)
 # =========================
 
 def ingest_pdf(files):
-    all_points = []
+    all_chunks = []
 
     for file in files:
         reader = PdfReader(file)
@@ -123,10 +135,11 @@ def ingest_pdf(files):
                 continue
 
             main, sub = detect_headings(text)
+
             chunks = re.split(r'(?<=[.!?]) +', text)
 
             for chunk in chunks:
-                all_points.append({
+                all_chunks.append({
                     "id": str(uuid.uuid4()),
                     "text": chunk[:1000],
                     "page": i+1,
@@ -135,15 +148,17 @@ def ingest_pdf(files):
                     "subheading": sub
                 })
 
-    # batch embed
-    vectors = embed_batch([p["text"] for p in all_points])
+    if not all_chunks:
+        return
+
+    vectors = embed_batch([c["text"] for c in all_chunks])
 
     points = []
-    for p, v in zip(all_points, vectors):
+    for c, v in zip(all_chunks, vectors):
         points.append({
-            "id": p["id"],
+            "id": c["id"],
             "vector": v,
-            "payload": p
+            "payload": c
         })
 
     qdrant.upsert(collection_name="docs", points=points)
@@ -164,23 +179,22 @@ def search(q):
     contexts, sources = [], []
 
     for r in results:
-        payload = r.payload
+        p = r.payload
 
         contexts.append(
-            f"[str. {payload['page']}] {payload['text']} "
-            f"(Nadpis: {payload.get('heading','')}, "
-            f"Podnadpis: {payload.get('subheading','')})"
+            f"[str. {p['page']}] {p['text']} "
+            f"(Nadpis: {p.get('heading','')}, Podnadpis: {p.get('subheading','')})"
         )
 
-        sources.append(payload)
+        sources.append(p)
 
     return contexts, sources
 
 # =========================
-# AI
+# AI (HF SAFE)
 # =========================
 
-def ask_ai(question, contexts):
+def ask_ai(q, contexts):
     url = "https://api-inference.huggingface.co/models/google/flan-t5-large"
 
     headers = {
@@ -203,12 +217,20 @@ TEXT:
 {chr(10).join(contexts)}
 
 OTÁZKA:
-{question}
+{q}
 """
 
     res = requests.post(url, headers=headers, json={"inputs": prompt})
 
-    return res.json()[0]["generated_text"]
+    if res.status_code != 200:
+        return "Chyba AI (Hugging Face)"
+
+    data = res.json()
+
+    if isinstance(data, list):
+        return data[0].get("generated_text", "Bez odpovědi")
+
+    return "AI neodpověděla"
 
 # =========================
 # PDF VIEW
@@ -217,6 +239,7 @@ OTÁZKA:
 def show_pdf(file, page):
     file.seek(0)
     b64 = base64.b64encode(file.read()).decode()
+
     st.markdown(
         f'<iframe src="data:application/pdf;base64,{b64}#page={page}" width="100%" height="500"></iframe>',
         unsafe_allow_html=True
@@ -229,33 +252,36 @@ def show_pdf(file, page):
 st.markdown("<div class='header'><h2>🛡️ VPP Checker</h2></div>", unsafe_allow_html=True)
 
 # =========================
-# SIDEBAR (ADMIN)
+# SIDEBAR (FIXED UX)
 # =========================
 
-st.sidebar.markdown("### 🔐 Admin")
+st.sidebar.markdown("## 🔐 Admin panel")
 
 pwd = st.sidebar.text_input("Heslo", type="password")
 
 if st.sidebar.button("Přihlásit"):
     if pwd == st.secrets["ADMIN_PASSWORD"]:
         st.session_state.logged = True
-        st.sidebar.success("OK")
+        st.sidebar.success("Přihlášeno")
 
-if st.session_state.logged:
-    files = st.sidebar.file_uploader(
-        "Nahraj PDF",
-        accept_multiple_files=True
-    )
+if not st.session_state.logged:
+    st.sidebar.info("🔒 Přihlas se pro upload PDF")
 
-    if files:
-        for f in files:
-            st.session_state.files[f.name] = f
+files = st.sidebar.file_uploader(
+    "📄 Nahraj PDF",
+    accept_multiple_files=True,
+    disabled=not st.session_state.logged
+)
 
-        ingest_pdf(files)
-        st.sidebar.success("Nahráno")
+if files and st.session_state.logged:
+    for f in files:
+        st.session_state.files[f.name] = f
+
+    ingest_pdf(files)
+    st.sidebar.success("Nahráno")
 
 # =========================
-# CHAT INPUT
+# CHAT
 # =========================
 
 q = st.chat_input("Zeptej se...")
@@ -269,10 +295,6 @@ if q:
         "a": answer,
         "sources": sources
     })
-
-# =========================
-# CHAT UI
-# =========================
 
 for i, item in enumerate(reversed(st.session_state.history)):
     st.markdown(f"<div class='chat-user'>{item['q']}</div>", unsafe_allow_html=True)
