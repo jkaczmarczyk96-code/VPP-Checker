@@ -5,10 +5,14 @@ from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 import re
 import base64
-import uuid  # 🔥 nový import
+import uuid
 
-# 🧠 MODEL
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# ⚡ CACHE MODEL (obrovský rozdíl)
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
 
 # 🔐 DB
 qdrant = QdrantClient(
@@ -16,8 +20,7 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-# 🔥 NOVÁ KOLEKCE
-collection = "docs_v3"
+collection = "docs_v4"
 
 try:
     qdrant.get_collection(collection)
@@ -34,10 +37,14 @@ if "history" not in st.session_state:
 if "files" not in st.session_state:
     st.session_state.files = {}
 
-# 🧠 EMBEDDING (FIX)
-def embed(text):
+# ⚡ CACHE EMBEDDING
+@st.cache_data(show_spinner=False)
+def embed_cached(text):
     vec = model.encode(text)
     return [float(x) for x in vec]
+
+def embed(text):
+    return embed_cached(text)
 
 # ✂️ CHUNKING
 def split_text(text, chunk_size=400):
@@ -57,12 +64,18 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 📥 INGEST (FIXED)
+# 📥 INGEST (rychlejší + progress)
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
 
-    for i, page in enumerate(reader.pages):
+    count = 0
+    progress = st.progress(0)
+
+    pages = reader.pages
+    total = len(pages)
+
+    for i, page in enumerate(pages):
         text = page.extract_text()
 
         if not text or len(text.strip()) < 30:
@@ -70,8 +83,7 @@ def ingest_pdf(file):
 
         chunks = split_text(text)
 
-        for j, chunk in enumerate(chunks):
-
+        for chunk in chunks:
             if not chunk or len(chunk.strip()) < 20:
                 continue
 
@@ -79,7 +91,7 @@ def ingest_pdf(file):
                 qdrant.upsert(
                     collection_name=collection,
                     points=[{
-                        "id": str(uuid.uuid4()),  # 🔥 HLAVNÍ FIX
+                        "id": str(uuid.uuid4()),
                         "vector": embed(chunk),
                         "payload": {
                             "text": chunk,
@@ -88,15 +100,21 @@ def ingest_pdf(file):
                         }
                     }]
                 )
-            except Exception as e:
-                st.warning(f"Chyba při ukládání: {e}")
+                count += 1
 
-    st.success("PDF nahráno")
+            except:
+                pass
 
-# 🧠 BEST SENTENCE
-def best_sentence(text, question):
+        progress.progress((i + 1) / total)
+
+    if count > 0:
+        st.success(f"✅ PDF nahráno ({count} částí)")
+    else:
+        st.error("❌ PDF se nepodařilo nahrát")
+
+# 🧠 BEST SENTENCE (optimalizace)
+def best_sentence(text, question, q_emb):
     sentences = re.split(r'(?<=[.!?]) +', text)
-    q_emb = embed(question)
 
     best = ""
     best_score = -1
@@ -105,7 +123,8 @@ def best_sentence(text, question):
         if len(s) < 20:
             continue
 
-        score = sum([a*b for a, b in zip(embed(s), q_emb)])
+        s_emb = embed(s)
+        score = sum(a*b for a, b in zip(s_emb, q_emb))
 
         if score > best_score:
             best_score = score
@@ -113,30 +132,25 @@ def best_sentence(text, question):
 
     return best.strip()
 
-# 📂 DOKUMENTY
+# 📂 CACHE dokumentů
+@st.cache_data
 def get_documents():
     res = qdrant.scroll(collection_name=collection, limit=1000)
-    docs = set()
+    return list({p.payload["source"] for p in res[0]})
 
-    for p in res[0]:
-        docs.add(p.payload["source"])
-
-    return list(docs)
-
-# 🔍 SEARCH
+# 🔍 SEARCH (rychlejší)
 def search(question, doc_filter=None):
-    query_filter = None
+    q_emb = embed(question)
 
+    query_filter = None
     if doc_filter and doc_filter != "Vše":
         query_filter = {
-            "must": [
-                {"key": "source", "match": {"value": doc_filter}}
-            ]
+            "must": [{"key": "source", "match": {"value": doc_filter}}]
         }
 
     results = qdrant.search(
         collection_name=collection,
-        query_vector=embed(question),
+        query_vector=q_emb,
         query_filter=query_filter,
         limit=5
     )
@@ -145,35 +159,27 @@ def search(question, doc_filter=None):
     sources = []
 
     for r in results:
-        text = r.payload["text"]
-        page = r.payload["page"]
-        source = r.payload["source"]
-
-        sentence = best_sentence(text, question)
+        sentence = best_sentence(r.payload["text"], question, q_emb)
 
         if sentence:
             answer_parts.append(
-                f"{sentence} <span style='color:#E43238'>[str. {page}]</span>"
+                f"{sentence} <span style='color:#E43238'>[str. {r.payload['page']}]</span>"
             )
-            sources.append((source, page, sentence))
+            sources.append((r.payload["source"], r.payload["page"], sentence))
 
-    answer = " ".join(answer_parts[:3])
-
-    return answer, sources
+    return " ".join(answer_parts[:3]), sources
 
 # 📄 PDF VIEW
 def show_pdf(file, page):
     file.seek(0)
     base64_pdf = base64.b64encode(file.read()).decode("utf-8")
 
-    pdf_display = f"""
+    st.markdown(f"""
     <iframe src="data:application/pdf;base64,{base64_pdf}#page={page}"
     width="100%" height="600"></iframe>
-    """
+    """, unsafe_allow_html=True)
 
-    st.markdown(pdf_display, unsafe_allow_html=True)
-
-# 🎨 DESIGN
+# 🎨 DESIGN (smooth UI)
 PRIMARY = "#314397"
 ACCENT = "#E43238"
 
@@ -181,11 +187,11 @@ st.set_page_config(page_title="VPP Checker", layout="wide")
 
 st.markdown(f"""
 <style>
-body {{ background-color: #f5f7fb; }}
-.header {{ background: {PRIMARY}; padding: 20px; border-radius: 12px; color: white; }}
-.card {{ background: white; padding: 20px; border-radius: 12px; border-left: 6px solid {ACCENT}; margin-top: 20px; }}
-.source {{ background: white; padding: 10px; border-radius: 8px; margin-top: 5px; border-left: 3px solid {PRIMARY}; }}
-.highlight {{ background-color: #fff3cd; }}
+.block-container {{padding-top:2rem;}}
+.header {{background:{PRIMARY};padding:20px;border-radius:12px;color:white;}}
+.card {{background:white;padding:20px;border-radius:12px;border-left:6px solid {ACCENT};margin-top:20px;}}
+.source {{background:white;padding:10px;border-radius:8px;margin-top:5px;border-left:3px solid {PRIMARY};}}
+.highlight {{background:#fff3cd;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -208,11 +214,9 @@ pwd = st.sidebar.text_input("Admin heslo", type="password")
 if pwd == st.secrets["ADMIN_PASSWORD"]:
     file = st.sidebar.file_uploader("Nahraj PDF", type="pdf")
 
-    if file:
-        if st.sidebar.button("Nahrát"):
-            ingest_pdf(file)
+    if file and st.sidebar.button("Nahrát"):
+        ingest_pdf(file)
 
-# 📂 FILTER
 docs = get_documents()
 selected_doc = st.sidebar.selectbox("Filtr dokumentu", ["Vše"] + docs)
 
@@ -229,9 +233,7 @@ if st.button("Odeslat") and q:
         "sources": sources
     })
 
-# 💬 HISTORIE
-st.markdown("### 💬 Historie")
-
+# HISTORIE
 for item in reversed(st.session_state.history):
     st.markdown(f"""
     <div class="card">
@@ -249,5 +251,5 @@ for item in reversed(st.session_state.history):
         """, unsafe_allow_html=True)
 
         if src in st.session_state.files:
-            if st.button(f"Otevřít {src} str. {page}"):
+            if st.button(f"Otevřít {src} str. {page}", key=f"{src}-{page}-{sentence[:10]}"):
                 show_pdf(st.session_state.files[src], page)
