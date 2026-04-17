@@ -15,8 +15,8 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-# 🔥 NOVÁ KOLEKCE (fix chyby)
-collection = "docs_v2"
+# 🔥 NOVÁ KOLEKCE (stabilní)
+collection = "docs_v3"
 
 try:
     qdrant.get_collection(collection)
@@ -33,9 +33,10 @@ if "history" not in st.session_state:
 if "files" not in st.session_state:
     st.session_state.files = {}
 
-# 🧠 EMBEDDING
+# 🧠 EMBEDDING (FIX)
 def embed(text):
-    return model.encode(text).tolist()
+    vec = model.encode(text)
+    return [float(x) for x in vec]
 
 # ✂️ CHUNKING
 def split_text(text, chunk_size=400):
@@ -69,18 +70,26 @@ def ingest_pdf(file):
         chunks = split_text(text)
 
         for j, chunk in enumerate(chunks):
-            qdrant.upsert(
-                collection_name=collection,
-                points=[{
-                    "id": f"{file.name}_{i}_{j}",
-                    "vector": embed(chunk),
-                    "payload": {
-                        "text": chunk,
-                        "source": file.name,
-                        "page": i + 1
-                    }
-                }]
-            )
+
+            # 🔥 ochrana proti prázdnému textu
+            if not chunk or len(chunk.strip()) < 20:
+                continue
+
+            try:
+                qdrant.upsert(
+                    collection_name=collection,
+                    points=[{
+                        "id": f"{file.name}_{i}_{j}",
+                        "vector": embed(chunk),
+                        "payload": {
+                            "text": chunk,
+                            "source": file.name,
+                            "page": i + 1
+                        }
+                    }]
+                )
+            except Exception as e:
+                st.warning(f"Chyba při ukládání: {e}")
 
     st.success("PDF nahráno")
 
@@ -159,7 +168,7 @@ def show_pdf(file, page):
 
     pdf_display = f"""
     <iframe src="data:application/pdf;base64,{base64_pdf}#page={page}"
-    width="100%" height="600" type="application/pdf"></iframe>
+    width="100%" height="600"></iframe>
     """
 
     st.markdown(pdf_display, unsafe_allow_html=True)
@@ -172,36 +181,11 @@ st.set_page_config(page_title="VPP Checker", layout="wide")
 
 st.markdown(f"""
 <style>
-body {{
-    background-color: #f5f7fb;
-}}
-
-.header {{
-    background: {PRIMARY};
-    padding: 20px;
-    border-radius: 12px;
-    color: white;
-}}
-
-.card {{
-    background: white;
-    padding: 20px;
-    border-radius: 12px;
-    border-left: 6px solid {ACCENT};
-    margin-top: 20px;
-}}
-
-.source {{
-    background: white;
-    padding: 10px;
-    border-radius: 8px;
-    margin-top: 5px;
-    border-left: 3px solid {PRIMARY};
-}}
-
-.highlight {{
-    background-color: #fff3cd;
-}}
+body {{ background-color: #f5f7fb; }}
+.header {{ background: {PRIMARY}; padding: 20px; border-radius: 12px; color: white; }}
+.card {{ background: white; padding: 20px; border-radius: 12px; border-left: 6px solid {ACCENT}; margin-top: 20px; }}
+.source {{ background: white; padding: 10px; border-radius: 8px; margin-top: 5px; border-left: 3px solid {PRIMARY}; }}
+.highlight {{ background-color: #fff3cd; }}
 </style>
 """, unsafe_allow_html=True)
 
