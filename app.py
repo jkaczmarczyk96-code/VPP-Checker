@@ -15,7 +15,8 @@ qdrant = QdrantClient(
     api_key=st.secrets["QDRANT_API_KEY"]
 )
 
-collection = "docs"
+# 🔥 NOVÁ KOLEKCE (fix chyby)
+collection = "docs_v2"
 
 try:
     qdrant.get_collection(collection)
@@ -25,7 +26,7 @@ except:
         vectors_config=VectorParams(size=384, distance=Distance.COSINE),
     )
 
-# 💬 SESSION (chat historie)
+# 💬 SESSION
 if "history" not in st.session_state:
     st.session_state.history = []
 
@@ -142,7 +143,9 @@ def search(question, doc_filter=None):
         sentence = best_sentence(text, question)
 
         if sentence:
-            answer_parts.append(f"{sentence} <span style='color:#E43238'>[str. {page}]</span>")
+            answer_parts.append(
+                f"{sentence} <span style='color:#E43238'>[str. {page}]</span>"
+            )
             sources.append((source, page, sentence))
 
     answer = " ".join(answer_parts[:3])
@@ -151,6 +154,7 @@ def search(question, doc_filter=None):
 
 # 📄 PDF VIEW
 def show_pdf(file, page):
+    file.seek(0)
     base64_pdf = base64.b64encode(file.read()).decode("utf-8")
 
     pdf_display = f"""
