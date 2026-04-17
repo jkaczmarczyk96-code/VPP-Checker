@@ -1,4 +1,3 @@
-```python
 # =========================
 # IMPORTS
 # =========================
@@ -439,4 +438,4 @@ OTÁZKA:
 # DEBUG
 with st.expander("🔍 Debug"):
     st.write(debug)
-```
+
