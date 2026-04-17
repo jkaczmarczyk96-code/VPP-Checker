@@ -1,5 +1,5 @@
 streamlit
-openai
 qdrant-client
+sentence-transformers
 pypdf
 requests
