@@ -2,7 +2,7 @@ streamlit
 qdrant-client
 sentence-transformers
 pypdf
-requests
+pdfplumber
+google-generativeai
 gspread
 oauth2client
-google-generativeai
