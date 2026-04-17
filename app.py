@@ -7,7 +7,7 @@ import re
 import base64
 import uuid
 
-# ⚡ CACHE MODEL (obrovský rozdíl)
+# ⚡ CACHE MODEL
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -64,7 +64,7 @@ def split_text(text, chunk_size=400):
 
     return chunks
 
-# 📥 INGEST (rychlejší + progress)
+# 📥 INGEST
 def ingest_pdf(file):
     reader = PdfReader(file)
     st.session_state.files[file.name] = file
@@ -101,7 +101,6 @@ def ingest_pdf(file):
                     }]
                 )
                 count += 1
-
             except:
                 pass
 
@@ -112,7 +111,7 @@ def ingest_pdf(file):
     else:
         st.error("❌ PDF se nepodařilo nahrát")
 
-# 🧠 BEST SENTENCE (optimalizace)
+# 🧠 BEST SENTENCE
 def best_sentence(text, question, q_emb):
     sentences = re.split(r'(?<=[.!?]) +', text)
 
@@ -132,13 +131,13 @@ def best_sentence(text, question, q_emb):
 
     return best.strip()
 
-# 📂 CACHE dokumentů
+# 📂 DOCUMENTS CACHE
 @st.cache_data
 def get_documents():
     res = qdrant.scroll(collection_name=collection, limit=1000)
     return list({p.payload["source"] for p in res[0]})
 
-# 🔍 SEARCH (rychlejší)
+# 🔍 SEARCH (FIXED)
 def search(question, doc_filter=None):
     q_emb = embed(question)
 
@@ -148,12 +147,12 @@ def search(question, doc_filter=None):
             "must": [{"key": "source", "match": {"value": doc_filter}}]
         }
 
-    results = qdrant.search(
+    results = qdrant.query_points(
         collection_name=collection,
-        query_vector=q_emb,
+        query=q_emb,
         query_filter=query_filter,
         limit=5
-    )
+    ).points  # 🔥 FIX
 
     answer_parts = []
     sources = []
@@ -179,7 +178,7 @@ def show_pdf(file, page):
     width="100%" height="600"></iframe>
     """, unsafe_allow_html=True)
 
-# 🎨 DESIGN (smooth UI)
+# 🎨 DESIGN
 PRIMARY = "#314397"
 ACCENT = "#E43238"
 
