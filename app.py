@@ -1,11 +1,13 @@
+
 import streamlit as st
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance
+from qdrant_client.models import VectorParams, Distance, Filter, FieldCondition, MatchValue
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from pypdf import PdfReader
 import pdfplumber
 import uuid
 import re
+import time
 import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -30,7 +32,6 @@ INSURERS = [
 
 for k, v in {
     "messages": [],
-    "feedback": [],
     "logged": False,
     "upload_key": str(uuid.uuid4())
 }.items():
@@ -38,11 +39,35 @@ for k, v in {
         st.session_state[k] = v
 
 # =========================
-# GEMINI
+# GEMINI SAFE LAYER
 # =========================
 
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model_gemini = genai.GenerativeModel("gemini-1.5-flash")
+
+MODELS = [
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest"
+]
+
+def generate_safe(prompt, stream=True, retries=2):
+    last_error = None
+
+    for model_name in MODELS:
+        model = genai.GenerativeModel(model_name)
+
+        for attempt in range(retries):
+            try:
+                if stream:
+                    return model.generate_content(prompt, stream=True)
+                else:
+                    return model.generate_content(prompt)
+
+            except Exception as e:
+                last_error = e
+                time.sleep(0.5)
+
+    st.error(f"AI ERROR: {last_error}")
+    return None
 
 # =========================
 # GOOGLE SHEETS
@@ -61,6 +86,18 @@ def log_query(q,ins,vpp,conf):
         sheet.worksheet("logs").append_row(row)
     except:
         pass
+
+# =========================
+# ALERTY
+# =========================
+
+st.sidebar.markdown("## 🚨 Alerty")
+try:
+    data = get_client().open("VPP_Feedback").worksheet("feedback").get_all_records()
+    bad = [r for r in data[-20:] if r.get("rating")=="dislike"]
+    st.sidebar.error(f"⚠️ {len(bad)} negativních feedbacků") if bad else st.sidebar.success("✅ OK")
+except:
+    st.sidebar.info("Alerty nedostupné")
 
 # =========================
 # QDRANT
@@ -102,6 +139,8 @@ def embed_doc(x): return model.encode([f"passage: {x}"])[0].tolist()
 # HELPERS
 # =========================
 
+def normalize(x): return x.strip().upper() if x else ""
+
 def smart_chunk(t, s=800, o=150):
     out, i = [], 0
     while i < len(t):
@@ -137,8 +176,8 @@ def ingest_pdf(files,vpp,ins):
                     "id":str(uuid.uuid4()),
                     "text":c,
                     "page":i+1,
-                    "vpp_name":vpp,
-                    "insurer":ins
+                    "vpp_name":normalize(vpp),
+                    "insurer":normalize(ins)
                 })
 
     vec=[embed_doc(c["text"]) for c in chunks]
@@ -148,32 +187,42 @@ def ingest_pdf(files,vpp,ins):
     st.session_state["upload_key"]=str(uuid.uuid4())
 
 # =========================
-# HARD SEARCH (NEPRŮSTŘELNÝ)
+# SEARCH (SAFE HYBRID)
 # =========================
+
+def keyword_score(q, text):
+    return len(set(q.lower().split()) & set(text.lower().split()))
 
 def search(q):
     try:
-        vec = embed_query(q)
+        vec = embed_query(q + " pojištění výluky podmínky")
 
-        # 🔥 vždy bez filtru
-        res = qdrant.query_points("docs", query=vec, limit=30).points
+        ins = normalize(selected_insurer)
+        vpp = normalize(selected_vpp)
+
+        # 🔹 primary (filtered)
+        filt=None
+        if ins!="— VYBER —" and vpp!="— VYBER —":
+            filt=Filter(must=[
+                FieldCondition(key="insurer",match=MatchValue(value=ins)),
+                FieldCondition(key="vpp_name",match=MatchValue(value=vpp))
+            ])
+
+        res=qdrant.query_points("docs",query=vec,query_filter=filt,limit=25).points
+
+        # 🔹 fallback no filter
+        if not res:
+            res=qdrant.query_points("docs",query=vec,limit=25).points
 
         if not res:
-            return [], 0
+            return [],0
 
-        # 🔥 soft filtr
-        filtered = []
-        for r in res:
-            if selected_vpp in r.payload.get("vpp_name",""):
-                filtered.append(r)
-
-        if filtered:
-            res = filtered
-
-        pairs=[(q,r.payload["text"]) for r in res]
+        enriched=[(r,keyword_score(q,r.payload["text"])) for r in res]
+        pairs=[(q,r.payload["text"]) for r,_ in enriched]
         scores=reranker.predict(pairs)
 
-        ranked=sorted(zip(res,scores),key=lambda x:x[1],reverse=True)
+        ranked=sorted([(r,s+(kw*0.3)) for (r,kw),s in zip(enriched,scores)],
+                      key=lambda x:x[1],reverse=True)
 
         ctx=[{
             "text":r.payload["text"],
@@ -181,9 +230,11 @@ def search(q):
             "page":r.payload["page"]
         } for r,_ in ranked[:5]]
 
-        return ctx, 80
+        conf=int(min(max(ranked[0][1]*20,0),100))
+        return ctx,conf
 
-    except:
+    except Exception as e:
+        st.error(f"SEARCH ERROR: {e}")
         return [],0
 
 # =========================
@@ -193,7 +244,10 @@ def search(q):
 st.title("🛡️ VPP Checker")
 
 selected_insurer=st.sidebar.selectbox("Pojišťovna",["— vyber —"]+INSURERS)
-selected_vpp=st.sidebar.text_input("VPP (nepovinné)")
+
+selected_vpp="— vyber —"
+if selected_insurer!="— vyber —":
+    selected_vpp=st.sidebar.text_input("VPP")
 
 # ADMIN
 if not st.session_state.logged:
@@ -209,7 +263,7 @@ else:
         ingest_pdf(f,v,i)
 
 # =========================
-# CHAT (STREAMING)
+# CHAT
 # =========================
 
 for msg in st.session_state.messages:
@@ -236,12 +290,15 @@ if prompt := st.chat_input("Zeptej se..."):
         else:
             combined = "\n\n".join([c["text"] for c in ctx])
 
-            stream = model_gemini.generate_content(combined, stream=True)
+            stream = generate_safe(combined, stream=True)
 
-            for chunk in stream:
-                if chunk.text:
-                    full += chunk.text
-                    placeholder.markdown(full + "▌")
+            if stream:
+                for chunk in stream:
+                    if hasattr(chunk, "text") and chunk.text:
+                        full += chunk.text
+                        placeholder.markdown(full + "▌")
+            else:
+                full = "❌ AI selhala"
 
             cites = "\n".join([
                 f"📄 \"{c['exact']}\" (str. {c['page']})"
