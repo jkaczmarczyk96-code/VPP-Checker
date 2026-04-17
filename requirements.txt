@@ -1,9 +1,5 @@
-fastapi
-uvicorn
-transformers
-torch
-sentence-transformers
 streamlit
 qdrant-client
+sentence-transformers
 pypdf
 requests
