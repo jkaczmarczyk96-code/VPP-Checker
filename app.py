@@ -1,7 +1,10 @@
-
 import streamlit as st
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    VectorParams, Distance,
+    Filter, FieldCondition, MatchValue,
+    PayloadSchemaType
+)
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from pypdf import PdfReader
 import pdfplumber
@@ -55,13 +58,12 @@ def generate_safe(prompt, stream=True, retries=2):
     for model_name in MODELS:
         model = genai.GenerativeModel(model_name)
 
-        for attempt in range(retries):
+        for _ in range(retries):
             try:
                 if stream:
                     return model.generate_content(prompt, stream=True)
                 else:
                     return model.generate_content(prompt)
-
             except Exception as e:
                 last_error = e
                 time.sleep(0.5)
@@ -100,7 +102,7 @@ except:
     st.sidebar.info("Alerty nedostupné")
 
 # =========================
-# QDRANT
+# QDRANT + INDEX
 # =========================
 
 qdrant = QdrantClient(
@@ -112,8 +114,21 @@ def init_collection():
     try:
         qdrant.get_collection("docs")
     except:
-        qdrant.create_collection("docs",
-            vectors_config=VectorParams(size=VECTOR_SIZE,distance=Distance.COSINE))
+        qdrant.create_collection(
+            "docs",
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+        )
+
+    # 🔥 payload indexy (kritické)
+    try:
+        qdrant.create_payload_index("docs", "insurer", PayloadSchemaType.KEYWORD)
+    except:
+        pass
+
+    try:
+        qdrant.create_payload_index("docs", "vpp_name", PayloadSchemaType.KEYWORD)
+    except:
+        pass
 
 init_collection()
 
@@ -153,6 +168,9 @@ def extract_sentence(p,q):
     qw=set(q.lower().split())
     return max(s,key=lambda x:len(qw & set(x.lower().split())),default=p)
 
+def get_memory(q):
+    return ""
+
 # =========================
 # INGEST
 # =========================
@@ -187,7 +205,7 @@ def ingest_pdf(files,vpp,ins):
     st.session_state["upload_key"]=str(uuid.uuid4())
 
 # =========================
-# SEARCH (SAFE HYBRID)
+# SEARCH
 # =========================
 
 def keyword_score(q, text):
@@ -197,20 +215,15 @@ def search(q):
     try:
         vec = embed_query(q + " pojištění výluky podmínky")
 
-        ins = normalize(selected_insurer)
-        vpp = normalize(selected_vpp)
-
-        # 🔹 primary (filtered)
         filt=None
-        if ins!="— VYBER —" and vpp!="— VYBER —":
+        if selected_insurer!="— vyber —" and selected_vpp!="":
             filt=Filter(must=[
-                FieldCondition(key="insurer",match=MatchValue(value=ins)),
-                FieldCondition(key="vpp_name",match=MatchValue(value=vpp))
+                FieldCondition(key="insurer",match=MatchValue(value=normalize(selected_insurer))),
+                FieldCondition(key="vpp_name",match=MatchValue(value=normalize(selected_vpp)))
             ])
 
         res=qdrant.query_points("docs",query=vec,query_filter=filt,limit=25).points
 
-        # 🔹 fallback no filter
         if not res:
             res=qdrant.query_points("docs",query=vec,limit=25).points
 
@@ -244,10 +257,7 @@ def search(q):
 st.title("🛡️ VPP Checker")
 
 selected_insurer=st.sidebar.selectbox("Pojišťovna",["— vyber —"]+INSURERS)
-
-selected_vpp="— vyber —"
-if selected_insurer!="— vyber —":
-    selected_vpp=st.sidebar.text_input("VPP")
+selected_vpp=st.sidebar.text_input("VPP")
 
 # ADMIN
 if not st.session_state.logged:
@@ -289,16 +299,13 @@ if prompt := st.chat_input("Zeptej se..."):
 
         else:
             combined = "\n\n".join([c["text"] for c in ctx])
-
             stream = generate_safe(combined, stream=True)
 
             if stream:
                 for chunk in stream:
-                    if hasattr(chunk, "text") and chunk.text:
+                    if hasattr(chunk,"text") and chunk.text:
                         full += chunk.text
                         placeholder.markdown(full + "▌")
-            else:
-                full = "❌ AI selhala"
 
             cites = "\n".join([
                 f"📄 \"{c['exact']}\" (str. {c['page']})"
