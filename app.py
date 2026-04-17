@@ -24,80 +24,93 @@ except:
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
     )
 
-# 🧠 EMBEDDING S RETRY
-def embed(text):
+# 🧠 BATCH EMBEDDING (hlavní fix)
+def embed_batch(texts):
     for attempt in range(5):
         try:
             return client.embeddings.create(
                 model="text-embedding-3-small",
-                input=text[:1500]  # kratší text
-            ).data[0].embedding
+                input=[t[:1000] for t in texts]
+            ).data
 
         except Exception as e:
             if "RateLimit" in str(e):
-                wait = 2 + attempt * 2
+                wait = 3 + attempt * 3
                 st.warning(f"⏳ Čekám {wait}s kvůli limitu...")
                 time.sleep(wait)
             else:
                 raise e
 
-    raise Exception("Embedding selhal")
+    raise Exception("Embedding batch selhal")
 
-# 📥 INGEST PDF
+# 📥 INGEST PDF (batch verze)
 def ingest_pdf(file):
     reader = PdfReader(file)
-    total_pages = len(reader.pages)
 
-    progress = st.progress(0)
-    status = st.empty()
+    texts = []
+    metas = []
 
+    # 📄 načtení textů
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
 
-        # ⛔ prázdná stránka
         if not text or len(text.strip()) < 20:
             continue
 
-        # ✂️ limit textu
-        text = text[:2000]
+        text = text[:1000]
 
-        point_id = f"{file.name}_{i}"
+        texts.append(text)
+        metas.append({
+            "id": f"{file.name}_{i}",
+            "source": file.name,
+            "page": i + 1
+        })
 
-        # 🔁 kontrola duplicity
-        try:
-            existing = qdrant.retrieve(
-                collection_name=collection,
-                ids=[point_id]
-            )
-            if existing:
-                continue
-        except:
-            pass
+    if not texts:
+        st.warning("PDF neobsahuje čitelný text")
+        return
 
-        # 📦 uložení
-        qdrant.upsert(
-            collection_name=collection,
-            points=[{
-                "id": point_id,
-                "vector": embed(text),
+    progress = st.progress(0)
+
+    batch_size = 5
+
+    # ⚡ batch zpracování
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i+batch_size]
+        batch_meta = metas[i:i+batch_size]
+
+        embeddings = embed_batch(batch_texts)
+
+        points = []
+        for emb, meta, text in zip(embeddings, batch_meta, batch_texts):
+            points.append({
+                "id": meta["id"],
+                "vector": emb.embedding,
                 "payload": {
                     "text": text,
-                    "source": file.name,
-                    "page": i + 1
+                    "source": meta["source"],
+                    "page": meta["page"]
                 }
-            }]
+            })
+
+        qdrant.upsert(
+            collection_name=collection,
+            points=points
         )
 
-        # ⏳ zpomalení
-        time.sleep(2)
+        progress.progress(min((i + batch_size) / len(texts), 1.0))
 
-        # 📊 progress
-        progress.progress((i + 1) / total_pages)
-        status.text(f"Zpracovávám stránku {i+1}/{total_pages}")
+        time.sleep(1)  # malé zpomalení
 
-    status.text("Hotovo ✅")
+    st.success("PDF nahráno ✅")
 
-# 🔍 DOTAZ
+# 🔍 DOTAZ (single embed OK)
+def embed(text):
+    return client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text[:1000]
+    ).data[0].embedding
+
 def search(question):
     results = qdrant.search(
         collection_name=collection,
@@ -148,7 +161,6 @@ if pwd == st.secrets["ADMIN_PASSWORD"]:
     if file:
         if st.sidebar.button("Nahrát do databáze"):
             ingest_pdf(file)
-            st.sidebar.success("PDF nahráno")
 
 # 💬 chat
 q = st.text_input("Zeptej se:")
