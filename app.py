@@ -1507,11 +1507,11 @@ def render_header():
     st.markdown(
         """
         <section class="app-hero">
-            <div class="app-eyebrow">Interni nastroj pro analyzu dokumentu</div>
+            <div class="app-eyebrow">Interní nástroj pro analýzu VPP</div>
             <h1 class="app-title">VPP Checker</h1>
             <p class="app-subtitle">
-                Odpovedi se opiraji pouze o nahrane pojistne podminky.
-                Vyber pojistovnu a dokument, poloz dotaz a zkontroluj citace ve vysledku.
+                Odpovědi se opírají pouze o nahrané pojistné podmínky.
+                Vyber pojišťovnu a VPP, polož dotaz a zkontroluj citace ve výsledku.
             </p>
         </section>
         """,
@@ -1520,14 +1520,14 @@ def render_header():
 
 
 def render_selection_status(insurer, vpp):
-    insurer_label = insurer if insurer != "— vyber —" else "Neni vybrano"
-    vpp_label = vpp if vpp != "— vyber —" else "Neni vybrano"
-    readiness = "Pripraveno k dotazu" if insurer != "— vyber —" and vpp != "— vyber —" else "Vyber dokument pro chat"
+    insurer_label = insurer if insurer != "— vyber —" else "Není vybráno"
+    vpp_label = vpp if vpp != "— vyber —" else "Není vybráno"
+    readiness = "Připraveno k dotazu" if insurer != "— vyber —" and vpp != "— vyber —" else "Vyber dokument pro chat"
     st.markdown(
         f"""
         <div class="selection-strip">
             <div class="selection-item">
-                <div class="selection-label">Pojistovna</div>
+                <div class="selection-label">Pojišťovna</div>
                 <div class="selection-value">{insurer_label}</div>
             </div>
             <div class="selection-item">
@@ -1650,8 +1650,8 @@ if prompt := st.chat_input("Zeptej se..."):
 
             prompt_ai = f"""
 Použij pouze věty v části TEXT. Nevymýšlej.
-Odpověz stručně česky a každé tvrzení doplň citací [str. X].
-Když odpověď není v TEXT, napiš: "V dostupném textu to není uvedeno."
+Odpověz stručně česky a každé tvrzení doplň citací a [str. X].
+Když odpověď není v TEXT, napiš: "V dostupném textu to není uvedeno. Poraď se s vedením směny."
 
 KONTEXT PAMĚTI:
 {memory}
