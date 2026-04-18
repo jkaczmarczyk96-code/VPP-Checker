@@ -51,7 +51,7 @@ DATA_DIR.mkdir(exist_ok=True)
 # =========================
 # LIMITS
 # =========================
-AI_TIMEOUT_SEC = 45
+AI_TIMEOUT_SEC = 90
 CIRCUIT_WINDOW_SEC = 180
 CIRCUIT_MAX_FAILURES = 5
 MEMORY_HALF_LIFE_HOURS = 72
@@ -1649,12 +1649,12 @@ def inject_design():
         }
 
         [data-testid="chatAvatarIcon-user"]::after {
-            content: "U";
+            content: "👤";
             background: #1d4ed8;
         }
 
         [data-testid="chatAvatarIcon-assistant"]::after {
-            content: "AI";
+            content: "🤖";
             background: #0f766e;
         }
 
@@ -1713,7 +1713,7 @@ def inject_design():
 
         [data-baseweb="select"] .material-symbols-rounded::after,
         [data-baseweb="select"] .material-symbols-outlined::after {
-            content: "▾";
+            content: "▼";
             font-size: 11px;
             color: var(--accent);
             position: absolute;
@@ -1789,7 +1789,7 @@ def inject_design():
             border: 1px solid var(--accent-strong) !important;
             border-radius: 10px !important;
             font-weight: 700 !important;
-            font-size: 0.9rem !important;
+            font-size: 0.8rem !important;
             min-height: 40px !important;
             display: inline-flex !important;
             align-items: center !important;
@@ -1815,7 +1815,7 @@ def inject_design():
         }
 
         [data-testid="stFileUploader"] small {
-            color: var(--muted) !important;
+            color: #ffffff !important;
         }
 
         [data-testid="stProgressBar"] + div,
@@ -1833,6 +1833,21 @@ def inject_design():
             border: 1px solid var(--border);
             border-radius: 10px;
             background: rgba(255, 255, 255, 0.86);
+        }
+
+        [data-testid="stExpander"] button {
+            font-family: inherit !important;
+        }
+
+        [data-testid="stExpander"] button::after {
+            content: "▶";
+            font-size: 14px;
+            color: var(--accent);
+            margin-left: 8px;
+        }
+
+        [data-testid="stExpander"][aria-expanded="true"] button::after {
+            content: "▼";
         }
 
         .stAlert {
@@ -1992,7 +2007,7 @@ else:
     )
     v = st.sidebar.text_input("VPP název")
     i = st.sidebar.selectbox("Pojišťovna", INSURERS, key="admin_insurer")
-    if st.sidebar.button("Nahrát"):
+    if st.sidebar.button("+"):
         ingest_documents(f or [], v or "", i)
         st.session_state.upload_key = str(uuid.uuid4())
         st.rerun()
@@ -2077,9 +2092,9 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
             prompt_ai = f"""
 TEXT je relevantní výběr z dokumentu. Může být v češtině nebo ve slovenštině.
 Použij pouze věty v části TEXT. Nevymýšlej.
-Projdi celý dodaný TEXT a najdi pasáže, které odpovídají na otázku.
-Napiš co nejúplnější a nejkonkrétnější odpověď v češtině.
-Popiš všechny relevantní informace, které dokument v TEXTU obsahuje k dotazu.
+Projdi celý dodaný TEXT a najdi všechny pasáže, které odpovídají na otázku.
+Napiš co nejúplnější a nejkonkrétnější odpověď v češtině, která pokrývá všechny relevantní informace.
+Popiš všechny relevantní informace, které dokument v TEXTU obsahuje k dotazu, bez omezení délky.
 Uveď, ze kterých sekcí nebo nadpisů je odpověď čerpána, pokud to je možné.
 Nepřidávej informace z jiných zdrojů.
 Pokud je v TEXT alespoň jedna relevantní pasáž, nikdy nepiš "V dostupném textu to není uvedeno.".
