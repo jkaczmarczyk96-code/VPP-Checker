@@ -1,8 +1,7 @@
 streamlit
 qdrant-client
 sentence-transformers
-pypdf
-pdfplumber
 google-generativeai
 gspread
 oauth2client
+python-docx
