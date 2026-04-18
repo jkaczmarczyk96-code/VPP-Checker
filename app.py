@@ -16,10 +16,9 @@ from types import SimpleNamespace
 
 import google.generativeai as genai
 import gspread
-import pdfplumber
 import streamlit as st
+from docx import Document as DocxDocument
 from oauth2client.service_account import ServiceAccountCredentials
-from pypdf import PdfReader
 from qdrant_client import QdrantClient
 from qdrant_client.models import *
 from sentence_transformers import CrossEncoder, SentenceTransformer
@@ -650,24 +649,127 @@ def get_uploaded_docs():
 # =========================
 # INGEST
 # =========================
-def ingest_pdf(files, vpp, ins):
+def extract_docx_sections(uploaded_file):
+    uploaded_file.seek(0)
+    doc = DocxDocument(uploaded_file)
+    sections = []
+    current_heading = ""
+    current_subheading = ""
+    buffer = []
+    non_empty_paragraphs = 0
+    heading_count = 0
+    subheading_count = 0
+
+    def flush_buffer():
+        if not buffer:
+            return
+        text = clean_text(" ".join(buffer))
+        if text:
+            sections.append({
+                "heading": current_heading or "Bez nadpisu",
+                "subheading": current_subheading or "",
+                "text": text,
+            })
+        buffer.clear()
+
+    for para in doc.paragraphs:
+        raw = (para.text or "").strip()
+        if not raw:
+            continue
+        non_empty_paragraphs += 1
+        style_name = ((para.style.name if para.style else "") or "").lower()
+        if "heading 1" in style_name or "nadpis 1" in style_name:
+            flush_buffer()
+            current_heading = raw
+            current_subheading = ""
+            heading_count += 1
+            continue
+        if "heading 2" in style_name or "nadpis 2" in style_name:
+            flush_buffer()
+            current_subheading = raw
+            subheading_count += 1
+            continue
+        buffer.append(raw)
+
+    flush_buffer()
+    return {
+        "sections": sections,
+        "non_empty_paragraphs": non_empty_paragraphs,
+        "heading_count": heading_count,
+        "subheading_count": subheading_count,
+    }
+
+
+def assess_docx_quality(doc_meta):
+    sections = doc_meta["sections"]
+    non_empty_paragraphs = doc_meta["non_empty_paragraphs"]
+    heading_count = doc_meta["heading_count"]
+    subheading_count = doc_meta["subheading_count"]
+    lengths = [len(s.get("text", "")) for s in sections if s.get("text")]
+    avg_len = int(sum(lengths) / max(len(lengths), 1)) if lengths else 0
+    max_len = max(lengths) if lengths else 0
+    missing_heading = sum(1 for s in sections if not s.get("heading") or s.get("heading") == "Bez nadpisu")
+    issues = []
+    score = 100
+
+    if not sections:
+        issues.append("Dokument neobsahuje čitelný text.")
+        score -= 70
+    if non_empty_paragraphs > 0 and heading_count == 0:
+        issues.append("Dokument nemá styly Nadpis 1. Doporučuji je doplnit kvůli přesným citacím.")
+        score -= 35
+    if heading_count > 0 and subheading_count == 0:
+        issues.append("Dokument nemá styly Nadpis 2. Citace budou méně detailní.")
+        score -= 10
+    if avg_len and avg_len < 140:
+        issues.append("Sekce jsou velmi krátké. Zkontroluj, zda převod nerozsekal odstavce.")
+        score -= 15
+    if max_len > 5000:
+        issues.append("Některé sekce jsou příliš dlouhé. Doporučuji jemnější členění nadpisy.")
+        score -= 10
+    if sections and missing_heading / max(len(sections), 1) > 0.6:
+        issues.append("Většina obsahu je bez nadpisu. Citace budou méně přesné.")
+        score -= 10
+
+    score = max(min(score, 100), 0)
+    return {
+        "score": score,
+        "issues": issues,
+        "stats": {
+            "odstavce": non_empty_paragraphs,
+            "sekce": len(sections),
+            "nadpisy": heading_count,
+            "podnadpisy": subheading_count,
+            "prumerna_delka_sekce": avg_len,
+            "max_delka_sekce": max_len,
+        },
+    }
+
+
+def ingest_documents(files, vpp, ins):
     vpp = normalize(vpp)
     ins = normalize(ins)
     if not files or not vpp or not ins:
-        st.sidebar.warning("Vyber PDF, VPP název a pojišťovnu.")
+        st.sidebar.warning("Vyber soubor, VPP název a pojišťovnu.")
         return
 
     progress = st.sidebar.progress(0)
     stats = st.sidebar.empty()
     report = []
 
-    total_pages = 0
-    file_pages = {}
+    total_units = 0
+    file_units = {}
+    parsed_docx = {}
     for f in files:
         try:
-            file_pages[f.name] = len(PdfReader(f).pages)
-            total_pages += file_pages[f.name]
-            f.seek(0)
+            suffix = Path(f.name).suffix.lower()
+            if suffix != ".docx":
+                raise ValueError("Podporovaný formát je pouze DOCX.")
+            doc_meta = extract_docx_sections(f)
+            quality = assess_docx_quality(doc_meta)
+            parsed_docx[f.name] = {"meta": doc_meta, "quality": quality}
+            file_units[f.name] = max(len(doc_meta["sections"]), 1)
+            total_units += file_units[f.name]
         except Exception as e:
             report.append({"file": f.name, "status": "error", "message": str(e)})
 
@@ -682,32 +784,28 @@ def ingest_pdf(files, vpp, ins):
     chunks = []
 
     for f in files:
-        try:
-            f.seek(0)
-            reader = PdfReader(f)
-            doc_id = hashlib.sha256(f"{ins}:{vpp}:{f.name}".encode("utf-8")).hexdigest()[:16]
-        except Exception as e:
-            report.append({"file": f.name, "status": "error", "message": str(e)})
+        doc_id = hashlib.sha256(f"{ins}:{vpp}:{f.name}".encode("utf-8")).hexdigest()[:16]
+        suffix = Path(f.name).suffix.lower()
+        if suffix != ".docx":
+            report.append({"file": f.name, "status": "error", "message": "Podporovaný formát je pouze DOCX."})
             continue
 
         file_chunk_count = 0
-        for i, p in enumerate(reader.pages):
-            t = None
-            try:
-                t = p.extract_text()
-            except Exception:
-                t = None
+        parsed = parsed_docx.get(f.name) or {}
+        doc_meta = parsed.get("meta") or {"sections": []}
+        quality = parsed.get("quality") or {"score": 0, "issues": ["Chybí data kvality."], "stats": {}}
+        sections = doc_meta["sections"]
+        if not sections:
+            report.append({
+                "file": f.name,
+                "status": "error",
+                "message": "DOCX neobsahuje čitelný text.",
+                "quality": quality,
+            })
+            continue
 
-            if not t:
-                try:
-                    f.seek(0)
-                    with pdfplumber.open(f) as pdf:
-                        t = pdf.pages[i].extract_text()
-                except Exception as e:
-                    report.append({"file": f.name, "page": i + 1, "status": "error", "message": str(e)})
-                    continue
-
-            for c in smart_chunk(t):
+        for idx, section in enumerate(sections, start=1):
+            for c in smart_chunk(section["text"]):
                 if len(c) < 50:
                     continue
                 chunk_hash = hashlib.sha256(clean_text(c).lower().encode("utf-8")).hexdigest()
@@ -718,12 +816,13 @@ def ingest_pdf(files, vpp, ins):
                 payload = {
                     "id": str(uuid.uuid4()),
                     "text": c,
-                    "page": i + 1,
+                    "page": idx,
                     "vpp_name": vpp,
                     "insurer": ins,
                     "doc_id": doc_id,
                     "file_name": f.name,
-                    "heading": extract_heading(c),
+                    "heading": section.get("heading", ""),
+                    "subheading": section.get("subheading", ""),
                     "chunk_hash": chunk_hash,
                     "schema_version": APP_VERSION,
                     "ingested_at": datetime.now().isoformat(timespec="seconds"),
@@ -732,17 +831,24 @@ def ingest_pdf(files, vpp, ins):
                 chunks.append(payload)
                 total_chunks += 1
                 file_chunk_count += 1
-
             done += 1
-            if total_pages:
-                progress.progress(min(done / total_pages, 1.0))
-
+            if total_units:
+                progress.progress(min(done / total_units, 1.0))
             elapsed = time.time() - start
-            eta = (elapsed / done) * (total_pages - done) if done and total_pages else 0
+            eta = (elapsed / done) * (total_units - done) if done and total_units else 0
             stats.markdown(
-                f"Pages: {done}/{total_pages} | Chunks: {total_chunks} | Duplicity: {duplicates} | ETA: {round(eta, 1)}s"
+                f"Sekce: {done}/{total_units} | Chunks: {total_chunks} | Duplicity: {duplicates} | ETA: {round(eta, 1)} s"
             )
-        report.append({"file": f.name, "status": "ok", "chunks": file_chunk_count})
+
+        file_status = "ok" if quality["score"] >= 60 else "warning"
+        report.append({
+            "file": f.name,
+            "status": file_status,
+            "chunks": file_chunk_count,
+            "quality": quality,
+        })
+        if quality["score"] < 60:
+            st.sidebar.warning(f"{f.name}: nízká kvalita dokumentu ({quality['score']} %). Zkontroluj Ingest report.")
 
     if not chunks:
         st.sidebar.info("Nenahrál se žádný nový chunk.")
@@ -1095,6 +1201,7 @@ def search(q, trace_id):
         "exact": item["exact"],
         "page": item["record"].payload["page"],
         "heading": item["record"].payload.get("heading", ""),
+        "subheading": item["record"].payload.get("subheading", ""),
     } for item in ranked[:5]]
 
     return ctx, conf, debug
@@ -1130,6 +1237,17 @@ def strict_answer_from_context(ctx):
         span = find_exact_span(c.get("exact", ""), c.get("text", ""))
         if span:
             lines.append(f"- {span['text']} [str. {c['page']}]")
+    return "\n".join(lines)
+
+
+def citations_from_context(ctx):
+    lines = []
+    for c in ctx:
+        span = find_exact_span(c.get("exact", ""), c.get("text", ""))
+        if span:
+            heading = c.get("heading") or "Bez nadpisu"
+            subheading = c.get("subheading") or "Bez podnadpisu"
+            lines.append(f"### {heading}\n**{subheading}**\n- \"{span['text']}\"")
     return "\n".join(lines)
 
 
@@ -1348,6 +1466,17 @@ def inject_design():
             margin-bottom: 1rem;
         }
 
+        div[data-testid="stChatMessage"] * {
+            color: var(--text) !important;
+        }
+
+        div[data-testid="stChatMessage"] [data-testid^="chatAvatarIcon"] svg,
+        div[data-testid="stChatMessage"] [data-testid^="chatAvatarIcon"] {
+            color: var(--accent) !important;
+            fill: var(--accent) !important;
+            opacity: 1 !important;
+        }
+
         div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
             background: var(--accent-soft);
             border-color: rgba(31, 78, 140, 0.18);
@@ -1408,6 +1537,8 @@ def inject_design():
             font-weight: 700;
             padding: 0.5rem 1rem;
             box-shadow: 0 10px 22px rgba(29, 78, 216, 0.34);
+            min-height: 42px;
+            transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
         }
 
         .stButton > button:hover {
@@ -1422,6 +1553,57 @@ def inject_design():
             border-color: var(--accent-press);
             background: var(--accent-press);
             transform: translateY(0);
+        }
+
+        .stButton > button:disabled,
+        .stButton > button[disabled] {
+            background: #dbe7ff !important;
+            border-color: #d1ddf6 !important;
+            color: #6b7fa6 !important;
+            box-shadow: none !important;
+            opacity: 1 !important;
+            transform: none !important;
+            cursor: not-allowed !important;
+        }
+
+        .stButton > button span,
+        .stButton > button p {
+            color: inherit !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.01em;
+        }
+
+        [data-testid="stFileUploader"] section {
+            border: 1px dashed #c8d7f7 !important;
+            border-radius: 14px !important;
+            background: #f8fbff !important;
+            padding: 0.9rem !important;
+        }
+
+        [data-testid="stFileUploader"] button {
+            background: var(--accent) !important;
+            color: #ffffff !important;
+            border: 1px solid var(--accent-strong) !important;
+            border-radius: 10px !important;
+            font-weight: 700 !important;
+            min-height: 40px !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            white-space: nowrap !important;
+            box-shadow: 0 8px 18px rgba(29, 78, 216, 0.28) !important;
+        }
+
+        [data-testid="stFileUploader"] button:hover {
+            background: var(--accent-strong) !important;
+            border-color: var(--accent-press) !important;
+        }
+
+        [data-testid="stFileUploader"] button span,
+        [data-testid="stFileUploader"] button p {
+            color: #ffffff !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.01em;
         }
 
         [data-testid="stExpander"] {
@@ -1451,6 +1633,8 @@ def inject_design():
         [data-testid="stChatInput"] {
             border-top: 1px solid var(--border);
             box-shadow: 0 -8px 22px rgba(15, 23, 42, 0.05);
+            padding: 0.55rem 0.8rem 0.75rem 0.8rem;
+            backdrop-filter: blur(8px);
         }
 
         [data-testid="stChatInput"] textarea,
@@ -1460,6 +1644,9 @@ def inject_design():
             -webkit-text-fill-color: var(--text) !important;
             border: 1px solid rgba(31, 78, 140, 0.55) !important;
             box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+            border-radius: 14px !important;
+            min-height: 52px !important;
+            padding: 0.72rem 0.9rem !important;
         }
 
         [data-testid="stChatInput"] textarea::placeholder {
@@ -1507,11 +1694,11 @@ def render_header():
     st.markdown(
         """
         <section class="app-hero">
-            <div class="app-eyebrow">Interní nástroj pro analýzu VPP</div>
+            <div class="app-eyebrow">Interní nástroj pro analýzu dokumentů</div>
             <h1 class="app-title">VPP Checker</h1>
             <p class="app-subtitle">
                 Odpovědi se opírají pouze o nahrané pojistné podmínky.
-                Vyber pojišťovnu a VPP, polož dotaz a zkontroluj citace ve výsledku.
+                Vyber pojišťovnu a dokument, polož dotaz a zkontroluj citace ve výsledku.
             </p>
         </section>
         """,
@@ -1527,7 +1714,7 @@ def render_selection_status(insurer, vpp):
         f"""
         <div class="selection-strip">
             <div class="selection-item">
-                <div class="selection-label">Pojišťovna</div>
+                <div class="selection-label">Pojistovna</div>
                 <div class="selection-value">{insurer_label}</div>
             </div>
             <div class="selection-item">
@@ -1570,11 +1757,16 @@ if not st.session_state.logged:
         st.rerun()
 else:
     st.sidebar.markdown("## Správa dokumentů")
-    f = st.sidebar.file_uploader("PDF", accept_multiple_files=True, key=st.session_state.upload_key)
+    f = st.sidebar.file_uploader(
+        "Dokumenty (DOCX)",
+        type=["docx"],
+        accept_multiple_files=True,
+        key=st.session_state.upload_key,
+    )
     v = st.sidebar.text_input("VPP název")
     i = st.sidebar.selectbox("Pojišťovna", INSURERS, key="admin_insurer")
     if st.sidebar.button("Nahrát"):
-        ingest_pdf(f or [], v or "", i)
+        ingest_documents(f or [], v or "", i)
         st.session_state.upload_key = str(uuid.uuid4())
         st.rerun()
 
@@ -1616,7 +1808,7 @@ if st.session_state.last_errors and st.session_state.debug_mode:
 # CHAT
 render_chat_history(st.session_state.messages)
 
-if prompt := st.chat_input("Zeptej se..."):
+if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
     trace_id = str(uuid.uuid4())
     if selected_insurer == "— vyber —" or selected_vpp == "— vyber —":
         st.warning("Vyber pojišťovnu a VPP")
@@ -1646,12 +1838,19 @@ if prompt := st.chat_input("Zeptej se..."):
             ph.markdown(full)
         else:
             memory = get_memory(prompt)
-            combined = "\n\n".join([f"[STRANA {c['page']}] {c['exact']}" for c in ctx])
+            combined = "\n\n".join([
+                f"[NADPIS] {c.get('heading') or 'Bez nadpisu'}\n"
+                f"[PODNADPIS] {c.get('subheading') or 'Bez podnadpisu'}\n"
+                f"{c['exact']}"
+                for c in ctx
+            ])
 
             prompt_ai = f"""
 Použij pouze věty v části TEXT. Nevymýšlej.
-Odpověz stručně česky a každé tvrzení doplň citací a [str. X].
-Když odpověď není v TEXT, napiš: "V dostupném textu to není uvedeno. Poraď se s vedením směny."
+Napiš krátké shrnutí v češtině (2-4 věty), ideálně stylem:
+"Výluky jsou ...", "Plnění je ...", "Podmínky uvádějí ...".
+Do shrnutí nepřidávej citace.
+Když odpověď není v TEXT, napiš: "V dostupném textu to není uvedeno."
 
 KONTEXT PAMĚTI:
 {memory}
@@ -1677,21 +1876,28 @@ Otázka: {prompt}
                     handle_error("Stream odpovědi se přerušil.", e, trace_id=trace_id, show=False)
 
             if not full.strip():
-                full = strict_answer_from_context(ctx)
+                full = "V dostupném textu to není uvedeno."
 
-            unsupported, matched_spans = validate_answer(full, ctx)
+            summary = clean_text(full)
+            unsupported, matched_spans = validate_answer(summary, ctx)
             if unsupported:
-                full = strict_answer_from_context(ctx)
+                summary = "Výluky a podmínky jsou uvedeny v přesných citacích níže."
                 debug["post_validation"] = {
-                    "status": "replaced_by_strict_extract",
+                    "status": "summary_replaced_by_safe_text",
                     "unsupported": unsupported,
                 }
             else:
                 debug["post_validation"] = {
                     "status": "ok",
                     "matched_spans": matched_spans,
-                    "mode": "substring_span",
+                    "mode": "summary_validated",
                 }
+
+            citations = citations_from_context(ctx)
+            if citations:
+                full = f"**Shrnutí**\n{summary}\n\n**Přesné citace**\n{citations}"
+            else:
+                full = f"**Shrnutí**\n{summary}"
 
             ph.markdown(full)
 
