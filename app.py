@@ -1,4 +1,3 @@
-<FILE filename="app.py" size="72450 bytes">
 # =========================
 # IMPORTS
 # =========================
@@ -41,7 +40,7 @@ INSURERS = [
     "SK - TravelCare", "SK - Generali", "SK - ECP", "SK - Wüstenrot", "SK - Uniqa"
 ]
 
-# NOVÁ KONSTANTA – optimální počet chunků pro nejlepší kvalitu odpovědi
+# OPTIMÁLNÍ POČET CHUNKŮ PRO NEJLEPŠÍ KVALITU ODPOVĚDI
 TOP_K_CONTEXT = 20
 
 logging.basicConfig(
@@ -65,7 +64,7 @@ LEARNING_ACTIVE_LIMIT = 3000
 LEARNING_PRUNE_KEEP = 2000
 RATE_LIMIT_WINDOW_SEC = 60
 RATE_LIMIT_MAX_QUERIES = 20
-RERANK_CANDIDATE_LIMIT = 60          # zvýšeno kvůli TOP_K_CONTEXT = 20
+RERANK_CANDIDATE_LIMIT = 60
 STREAM_RENDER_INTERVAL_SEC = 0.08
 
 # =========================
@@ -904,7 +903,7 @@ def ingest_documents(files, vpp, ins):
 
 
 # =========================
-# SEARCH (hybrid + debug) – TOP_K_CONTEXT integrováno
+# SEARCH (s TOP_K_CONTEXT)
 # =========================
 def bm25_scores(query, records, k1=1.5, b=0.75):
     docs = [tokenise((r.payload or {}).get("text", "")) for r in records]
@@ -1255,7 +1254,7 @@ def search(q, trace_id):
         "confidence": conf,
     })
 
-    # KLÍČOVÁ ZMĚNA: posíláme optimálních TOP_K_CONTEXT chunků
+    # KLÍČOVÉ: posíláme TOP_K_CONTEXT nejlepších chunků
     ctx = [{
         "id": item["id"],
         "text": item["record"].payload["text"],
@@ -1269,7 +1268,7 @@ def search(q, trace_id):
 
 
 # =========================
-# CITATION VALIDATION (původní)
+# CITATION + VALIDACE
 # =========================
 def compact_for_match(text):
     text = clean_text(text).lower()
@@ -1357,7 +1356,7 @@ def validate_answer(answer, ctx):
 
 
 # =========================
-# UI HELPERS (původní)
+# UI HELPERS
 # =========================
 def render_chat_history(messages):
     for idx, m in enumerate(messages):
@@ -1427,7 +1426,7 @@ def inject_design():
             --shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
             --app-font: "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
         }
-        /* (zbytek designu stejný jako v původním kódu) */
+        /* design z původního kódu */
         </style>
         """,
         unsafe_allow_html=True,
@@ -1476,7 +1475,7 @@ def render_selection_status(insurer, vpp):
 
 
 # =========================
-# HLAVNÍ CHAT LOGIKA – plně integrováno s TOP_K_CONTEXT
+# HLAVNÍ CHAT LOGIKA
 # =========================
 inject_design()
 render_header()
@@ -1673,4 +1672,3 @@ Otázka uživatele: {prompt}
 
         assistant_idx = len(st.session_state.messages) - 1
         st.session_state.feedback_chunk_ids[assistant_idx] = [c["id"] for c in ctx]
-</FILE>
