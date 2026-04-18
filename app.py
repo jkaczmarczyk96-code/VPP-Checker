@@ -10,6 +10,7 @@ import statistics
 import time
 import uuid
 from collections import Counter, defaultdict, deque
+import html
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1302,12 +1303,12 @@ def strict_answer_from_context(ctx):
     return "\n".join(lines)
 
 
-def citations_from_context(ctx):
+def citations_from_context(ctx, max_items=1):
     blocks = []
-    for i, c in enumerate(ctx, start=1):
+    for i, c in enumerate(ctx[:max_items], start=1):
         heading = c.get("heading") or "Bez nadpisu"
         subheading = c.get("subheading") or ""
-        text = clean_text(c.get("text", ""))
+        text = c.get("text", "").strip()
         if not text:
             continue
         block = [f"[CITACE {i}]", f"Nadpis: {heading}"]
@@ -1317,6 +1318,22 @@ def citations_from_context(ctx):
         block.append(text)
         blocks.append("\n".join(block))
     return "\n\n" + ("\n\n" + ("-" * 72) + "\n\n").join(blocks) if blocks else ""
+
+
+def render_citations(citations):
+    if not citations:
+        return
+    escaped = html.escape(citations)
+    st.markdown(
+        (
+            "<div style='background:#111827;color:#e2e8f0;padding:16px;border-radius:14px;"
+            "white-space:pre-wrap;font-family:ui-monospace, SFMono-Regular, Consolas, Courier New, monospace;"
+            "line-height:1.5; font-size:0.95rem;'>"
+            f"{escaped}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def build_summary_from_context(ctx, question):
@@ -1456,7 +1473,8 @@ def inject_design():
         .material-symbols-outlined,
         .material-symbols-rounded,
         .material-symbols-sharp {
-            font-family: "Segoe UI Symbol", "Apple Color Emoji", "Noto Color Emoji", sans-serif !important;
+            font-family: "Material Symbols Outlined", "Material Symbols Rounded", "Material Symbols Sharp", sans-serif !important;
+            font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24 !important;
         }
 
         [data-testid="stHeader"] {
@@ -1711,13 +1729,16 @@ def inject_design():
             outline-offset: 2px !important;
         }
 
-        .stButton > button {
+        .stButton > button,
+        [data-testid="stFileUploader"] button {
             border-radius: 12px;
             border: 1px solid var(--accent);
             background: var(--accent);
             color: white;
             font-weight: 700;
-            padding: 0.5rem 1rem;
+            font-size: 0.95rem !important;
+            line-height: 1.3 !important;
+            padding: 0.45rem 0.95rem;
             box-shadow: 0 10px 22px rgba(29, 78, 216, 0.34);
             min-height: 42px;
             transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
@@ -2057,12 +2078,12 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
 TEXT je relevantní výběr z dokumentu. Může být v češtině nebo ve slovenštině.
 Použij pouze věty v části TEXT. Nevymýšlej.
 Projdi celý dodaný TEXT a najdi pasáže, které odpovídají na otázku.
-Napiš krátké, konkrétní shrnutí v češtině (3-6 vět).
-Uveď, ze kterých sekcí nebo nadpisů je odpověď čerpána, pokud to jde.
+Napiš co nejúplnější a nejkonkrétnější odpověď v češtině.
+Popiš všechny relevantní informace, které dokument v TEXTU obsahuje k dotazu.
+Uveď, ze kterých sekcí nebo nadpisů je odpověď čerpána, pokud to je možné.
 Nepřidávej informace z jiných zdrojů.
 Pokud je v TEXT alespoň jedna relevantní pasáž, nikdy nepiš "V dostupném textu to není uvedeno.".
 Použij tuto větu pouze tehdy, pokud v TEXT opravdu není nic relevantního.
-Shrnutí musí být konkrétní, ne jen obecné názvy sekcí.
 
 KONTEXT PAMĚTI:
 {memory}
@@ -2120,7 +2141,7 @@ Otázka: {prompt}
             ph.markdown(full)
             if citations:
                 with st.expander("Citace"):
-                    st.code(citations)
+                    render_citations(citations)
 
         st.caption(f"Spolehlivost: {conf}% | Trace: {trace_id}")
         st.session_state.messages.append({"role": "assistant", "content": full, "citations": citations})
