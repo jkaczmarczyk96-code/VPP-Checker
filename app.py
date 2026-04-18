@@ -72,6 +72,7 @@ defaults = {
     "feedback": [],
     "feedback_done": {},
     "feedback_open": {},
+    "feedback_chunk_ids": {},
     "logged": False,
     "upload_key": str(uuid.uuid4()),
     "ai_failures": deque(maxlen=8),
@@ -755,7 +756,9 @@ def ingest_documents(files, vpp, ins):
 
     progress = st.sidebar.progress(0)
     stats = st.sidebar.empty()
+    upload_status = st.sidebar.empty()
     report = []
+    upload_status.info("Nahrávání bylo spuštěno...")
 
     total_units = 0
     file_units = {}
@@ -784,6 +787,7 @@ def ingest_documents(files, vpp, ins):
     chunks = []
 
     for f in files:
+        upload_status.info(f"Zpracovávám: {f.name}")
         doc_id = hashlib.sha256(f"{ins}:{vpp}:{f.name}".encode("utf-8")).hexdigest()[:16]
         suffix = Path(f.name).suffix.lower()
         if suffix != ".docx":
@@ -851,6 +855,7 @@ def ingest_documents(files, vpp, ins):
             st.sidebar.warning(f"{f.name}: nízká kvalita dokumentu ({quality['score']} %). Zkontroluj Ingest report.")
 
     if not chunks:
+        upload_status.warning("Nahrávání skončilo bez nových chunků.")
         st.sidebar.info("Nenahrál se žádný nový chunk.")
         with st.sidebar.expander("Ingest report"):
             st.json(report)
@@ -860,8 +865,10 @@ def ingest_documents(files, vpp, ins):
     pts = [PointStruct(id=c["id"], vector=v, payload=c) for c, v in zip(chunks, vec)]
     try:
         batch_upsert(pts)
+        upload_status.success(f"Nahrávání dokončeno. Nahráno {len(chunks)} chunků.")
         st.sidebar.success(f"Nahráno {len(chunks)} chunků.")
     except Exception as e:
+        upload_status.error("Nahrávání selhalo při ukládání do Qdrantu.")
         handle_error("Nahrávání do Qdrantu selhalo.", e)
 
     with st.sidebar.expander("Ingest report"):
@@ -1241,14 +1248,20 @@ def strict_answer_from_context(ctx):
 
 
 def citations_from_context(ctx):
-    lines = []
-    for c in ctx:
-        span = find_exact_span(c.get("exact", ""), c.get("text", ""))
-        if span:
-            heading = c.get("heading") or "Bez nadpisu"
-            subheading = c.get("subheading") or "Bez podnadpisu"
-            lines.append(f"### {heading}\n**{subheading}**\n- \"{span['text']}\"")
-    return "\n".join(lines)
+    blocks = []
+    for i, c in enumerate(ctx, start=1):
+        heading = c.get("heading") or "Bez nadpisu"
+        subheading = c.get("subheading") or ""
+        text = clean_text(c.get("text", ""))
+        if not text:
+            continue
+        block = [f"[CITACE {i}]", f"Nadpis: {heading}"]
+        if subheading:
+            block.append(f"Podnadpis: {subheading}")
+        block.append("Text:")
+        block.append(text)
+        blocks.append("\n".join(block))
+    return "\n\n" + ("\n\n" + ("-" * 72) + "\n\n").join(blocks) if blocks else ""
 
 
 def validate_answer(answer, ctx):
@@ -1273,24 +1286,52 @@ def validate_answer(answer, ctx):
     return unsupported, matched_spans
 
 
-def grouped_messages(messages):
-    grouped = []
-    for msg in messages:
-        if grouped and grouped[-1]["role"] == msg["role"]:
-            grouped[-1]["content"] += "\n\n" + msg["content"]
-        else:
-            grouped.append(dict(msg))
-    return grouped
-
-
 def render_chat_history(messages):
-    for m in grouped_messages(messages):
+    for idx, m in enumerate(messages):
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
+            if m.get("role") == "assistant" and m.get("citations"):
+                with st.expander("Citace"):
+                    st.code(m["citations"])
 
 
 def render_typing_indicator(ph, label="Pisu odpoved"):
     ph.markdown(f"{label}...")
+
+
+def render_feedback_panel():
+    messages = st.session_state.messages
+    if not messages or messages[-1].get("role") != "assistant":
+        return
+
+    idx = len(messages) - 1
+    if st.session_state.feedback_done.get(idx):
+        return
+
+    prompt_text = ""
+    for i in range(idx - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            prompt_text = messages[i].get("content", "")
+            break
+    answer_text = messages[idx].get("content", "")
+    chunk_ids = st.session_state.feedback_chunk_ids.get(idx, [])
+
+    c1, c2 = st.columns(2)
+    if c1.button("Odpověď pomohla", key=f"l{idx}"):
+        save_feedback(prompt_text, answer_text, "like", "", chunk_ids)
+        st.session_state.feedback_done[idx] = True
+        st.rerun()
+
+    if c2.button("Nahlásit problém", key=f"d{idx}"):
+        st.session_state.feedback_open[idx] = True
+
+    if st.session_state.feedback_open.get(idx):
+        note = st.text_input("Co bylo špatně?", key=f"n{idx}")
+        if st.button("Odeslat", key=f"s{idx}"):
+            save_feedback(prompt_text, answer_text, "dislike", note, chunk_ids)
+            st.session_state.feedback_done[idx] = True
+            st.session_state.feedback_open[idx] = False
+            st.rerun()
 
 
 def inject_design():
@@ -1333,6 +1374,12 @@ def inject_design():
             font-family: var(--app-font) !important;
         }
 
+        .material-symbols-outlined,
+        .material-symbols-rounded,
+        .material-symbols-sharp {
+            font-family: "Material Symbols Rounded", "Material Symbols Outlined" !important;
+        }
+
         [data-testid="stHeader"] {
             background: rgba(255, 255, 255, 0.9);
             backdrop-filter: blur(10px);
@@ -1343,6 +1390,14 @@ def inject_design():
             background: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
             border-right: 1px solid var(--border);
             box-shadow: 8px 0 30px rgba(15, 23, 42, 0.03);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] div {
+            color: var(--text);
         }
 
         [data-testid="stSidebar"]::before {
@@ -1606,6 +1661,19 @@ def inject_design():
             letter-spacing: 0.01em;
         }
 
+        [data-testid="stFileUploader"] button p {
+            display: none !important;
+        }
+
+        [data-testid="stFileUploader"] small {
+            color: var(--muted) !important;
+        }
+
+        [data-testid="stProgressBar"] + div,
+        [data-testid="stProgressBar"] + div * {
+            color: var(--text) !important;
+        }
+
         [data-testid="stExpander"] {
             border: 1px solid var(--border);
             border-radius: 10px;
@@ -1647,6 +1715,7 @@ def inject_design():
             border-radius: 14px !important;
             min-height: 52px !important;
             padding: 0.72rem 0.9rem !important;
+            caret-color: var(--accent) !important;
         }
 
         [data-testid="stChatInput"] textarea::placeholder {
@@ -1757,6 +1826,9 @@ if not st.session_state.logged:
         st.rerun()
 else:
     st.sidebar.markdown("## Správa dokumentů")
+    if st.sidebar.button("Odhlásit se"):
+        st.session_state.logged = False
+        st.rerun()
     f = st.sidebar.file_uploader(
         "Dokumenty (DOCX)",
         type=["docx"],
@@ -1807,6 +1879,7 @@ if st.session_state.last_errors and st.session_state.debug_mode:
 
 # CHAT
 render_chat_history(st.session_state.messages)
+render_feedback_panel()
 
 if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
     trace_id = str(uuid.uuid4())
@@ -1827,6 +1900,7 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
     with st.chat_message("assistant"):
         ph = st.empty()
         full = ""
+        citations = ""
         last_render = 0
         render_typing_indicator(ph)
 
@@ -1841,7 +1915,7 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
             combined = "\n\n".join([
                 f"[NADPIS] {c.get('heading') or 'Bez nadpisu'}\n"
                 f"[PODNADPIS] {c.get('subheading') or 'Bez podnadpisu'}\n"
-                f"{c['exact']}"
+                f"{c['text']}"
                 for c in ctx
             ])
 
@@ -1880,29 +1954,26 @@ Otázka: {prompt}
 
             summary = clean_text(full)
             unsupported, matched_spans = validate_answer(summary, ctx)
-            if unsupported:
-                summary = "Výluky a podmínky jsou uvedeny v přesných citacích níže."
-                debug["post_validation"] = {
-                    "status": "summary_replaced_by_safe_text",
-                    "unsupported": unsupported,
-                }
-            else:
-                debug["post_validation"] = {
-                    "status": "ok",
-                    "matched_spans": matched_spans,
-                    "mode": "summary_validated",
-                }
+            debug["post_validation"] = {
+                "status": "ok_with_summary_mode",
+                "unsupported_count": len(unsupported),
+                "matched_spans": matched_spans,
+                "mode": "summary_plus_explicit_citations",
+            }
 
-            citations = citations_from_context(ctx)
+            citations = citations_from_context(ctx).strip()
             if citations:
-                full = f"**Shrnutí**\n{summary}\n\n**Přesné citace**\n{citations}"
+                full = f"**Shrnutí**\n{summary}\n\nCitace otevřeš přes tlačítko **Citace** níže."
             else:
                 full = f"**Shrnutí**\n{summary}"
 
             ph.markdown(full)
+            if citations:
+                with st.expander("Citace"):
+                    st.code(citations)
 
         st.caption(f"Spolehlivost: {conf}% | Trace: {trace_id}")
-        st.session_state.messages.append({"role": "assistant", "content": full})
+        st.session_state.messages.append({"role": "assistant", "content": full, "citations": citations})
         persist_memory("assistant", full)
         log_query(prompt, selected_insurer, selected_vpp, conf, trace_id)
 
@@ -1913,24 +1984,5 @@ Otázka: {prompt}
                 "top_candidates": debug.get("candidates", [])[:5],
             })
 
-        # FEEDBACK
-        idx = len(st.session_state.messages)
-        chunk_ids = [c["id"] for c in ctx]
-        if idx not in st.session_state.feedback_done:
-            c1, c2 = st.columns(2)
-
-            if c1.button("Odpověď pomohla", key=f"l{idx}"):
-                save_feedback(prompt, full, "like", "", chunk_ids)
-                st.session_state.feedback_done[idx] = True
-                st.rerun()
-
-            if c2.button("Nahlásit problém", key=f"d{idx}"):
-                st.session_state.feedback_open[idx] = True
-
-            if st.session_state.feedback_open.get(idx):
-                note = st.text_input("Co bylo špatně?", key=f"n{idx}")
-                if st.button("Odeslat", key=f"s{idx}"):
-                    save_feedback(prompt, full, "dislike", note, chunk_ids)
-                    st.session_state.feedback_done[idx] = True
-                    st.session_state.feedback_open[idx] = False
-                    st.rerun()
+        assistant_idx = len(st.session_state.messages) - 1
+        st.session_state.feedback_chunk_ids[assistant_idx] = [c["id"] for c in ctx]
