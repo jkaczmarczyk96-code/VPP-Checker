@@ -290,13 +290,7 @@ def log_query(q, ins, vpp, conf, trace_id):
 # =========================
 # ALERTY
 # =========================
-st.sidebar.markdown("## Stav systému")
-try:
-    data = get_client().open("VPP_Feedback").worksheet("feedback").get_all_records()
-    bad = [r for r in data[-20:] if (r.get("r") == "dislike" or r.get("rating") == "dislike")]
-    st.sidebar.error(f"{len(bad)} negativních") if bad else st.sidebar.success("OK")
-except Exception:
-    st.sidebar.info("Nedostupné")
+# Stav systému se zobrazuje pouze po přihlášení admina
 
 
 # =========================
@@ -1326,9 +1320,9 @@ def render_citations(citations):
     escaped = html.escape(citations)
     st.markdown(
         (
-            "<div style='background:#111827;color:#e2e8f0;padding:16px;border-radius:14px;"
-            "white-space:pre-wrap;font-family:ui-monospace, SFMono-Regular, Consolas, Courier New, monospace;"
-            "line-height:1.5; font-size:0.95rem;'>"
+            "<div style='background:#ffffff;color:#0f172a;padding:20px;border-radius:16px;border:1px solid #e5e7eb;"
+            "white-space:pre-wrap;font-family:Inter, system-ui, sans-serif;"
+            "line-height:1.6; font-size:0.95rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1);'>"
             f"{escaped}"
             "</div>"
         ),
@@ -1713,12 +1707,13 @@ def inject_design():
 
         [data-baseweb="select"] .material-symbols-rounded::after,
         [data-baseweb="select"] .material-symbols-outlined::after {
-            content: "▼";
-            font-size: 11px;
+            content: "▾";
+            font-size: 12px;
             color: var(--accent);
             position: absolute;
             inset: -1px 0 0 0;
             text-align: center;
+            font-weight: bold;
         }
 
         textarea:focus,
@@ -1777,36 +1772,49 @@ def inject_design():
         }
 
         [data-testid="stFileUploader"] section {
-            border: 1px dashed #c8d7f7 !important;
-            border-radius: 14px !important;
-            background: #f8fbff !important;
-            padding: 0.9rem !important;
+            border: 2px dashed var(--accent) !important;
+            border-radius: 16px !important;
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%) !important;
+            padding: 1.5rem !important;
+            transition: all 0.3s ease !important;
+        }
+
+        [data-testid="stFileUploader"] section:hover {
+            border-color: var(--accent-strong) !important;
+            background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%) !important;
         }
 
         [data-testid="stFileUploader"] button {
-            background: var(--accent) !important;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%) !important;
             color: #ffffff !important;
-            border: 1px solid var(--accent-strong) !important;
-            border-radius: 10px !important;
-            font-weight: 700 !important;
-            font-size: 0.8rem !important;
-            min-height: 40px !important;
+            border: none !important;
+            border-radius: 12px !important;
+            font-weight: 600 !important;
+            font-size: 0.9rem !important;
+            min-height: 44px !important;
+            padding: 0.75rem 1.5rem !important;
+            box-shadow: 0 4px 12px rgba(29, 78, 216, 0.25) !important;
+            transition: all 0.3s ease !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
             white-space: nowrap !important;
-            box-shadow: 0 8px 18px rgba(29, 78, 216, 0.28) !important;
         }
 
         [data-testid="stFileUploader"] button:hover {
-            background: var(--accent-strong) !important;
-            border-color: var(--accent-press) !important;
+            background: linear-gradient(135deg, var(--accent-strong) 0%, #1e3a8a 100%) !important;
+            transform: translateY(-2px) !important;
+            box-shadow: 0 6px 16px rgba(29, 78, 216, 0.35) !important;
+        }
+
+        [data-testid="stFileUploader"] button:active {
+            transform: translateY(0) !important;
         }
 
         [data-testid="stFileUploader"] button span,
         [data-testid="stFileUploader"] button p {
             color: #ffffff !important;
-            font-weight: 700 !important;
+            font-weight: 600 !important;
             letter-spacing: 0.01em;
         }
 
@@ -1815,7 +1823,9 @@ def inject_design():
         }
 
         [data-testid="stFileUploader"] small {
-            color: #ffffff !important;
+            color: var(--text) !important;
+            font-size: 0.85rem !important;
+            font-weight: 500 !important;
         }
 
         [data-testid="stProgressBar"] + div,
@@ -1841,9 +1851,10 @@ def inject_design():
 
         [data-testid="stExpander"] button::after {
             content: "▶";
-            font-size: 14px;
+            font-size: 16px;
             color: var(--accent);
-            margin-left: 8px;
+            margin-left: 10px;
+            font-weight: bold;
         }
 
         [data-testid="stExpander"][aria-expanded="true"] button::after {
@@ -2007,7 +2018,7 @@ else:
     )
     v = st.sidebar.text_input("VPP název")
     i = st.sidebar.selectbox("Pojišťovna", INSURERS, key="admin_insurer")
-    if st.sidebar.button("+"):
+    if st.sidebar.button("Nahrát"):
         ingest_documents(f or [], v or "", i)
         st.session_state.upload_key = str(uuid.uuid4())
         st.rerun()
@@ -2042,6 +2053,14 @@ else:
             st.rerun()
         except Exception as e:
             handle_error("Rebuild kolekce selhal.", e)
+
+    st.sidebar.markdown("## Stav systému")
+    try:
+        data = get_client().open("VPP_Feedback").worksheet("feedback").get_all_records()
+        bad = [r for r in data[-20:] if (r.get("r") == "dislike" or r.get("rating") == "dislike")]
+        st.sidebar.error(f"{len(bad)} negativních") if bad else st.sidebar.success("OK")
+    except Exception:
+        st.sidebar.info("Nedostupné")
 
 if st.session_state.last_errors and st.session_state.debug_mode:
     with st.sidebar.expander("Poslední chyby"):
@@ -2093,12 +2112,13 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
 TEXT je relevantní výběr z dokumentu. Může být v češtině nebo ve slovenštině.
 Použij pouze věty v části TEXT. Nevymýšlej.
 Projdi celý dodaný TEXT a najdi všechny pasáže, které odpovídají na otázku.
-Napiš co nejúplnější a nejkonkrétnější odpověď v češtině, která pokrývá všechny relevantní informace.
-Popiš všechny relevantní informace, které dokument v TEXTU obsahuje k dotazu, bez omezení délky.
+Napiš úplnou, koherentní odpověď v češtině, která pokrývá všechny relevantní informace bez omezení délky.
+Shrň informace z TEXTU do logického, čitelného textu, který odpovídá na otázku.
 Uveď, ze kterých sekcí nebo nadpisů je odpověď čerpána, pokud to je možné.
 Nepřidávej informace z jiných zdrojů.
 Pokud je v TEXT alespoň jedna relevantní pasáž, nikdy nepiš "V dostupném textu to není uvedeno.".
 Použij tuto větu pouze tehdy, pokud v TEXT opravdu není nic relevantního.
+Odpověď musí být kompletní a nesmí končit třemi tečkami.
 
 KONTEXT PAMĚTI:
 {memory}
