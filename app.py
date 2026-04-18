@@ -1297,19 +1297,33 @@ def strict_answer_from_context(ctx):
     return "\n".join(lines)
 
 
-def citations_from_context(ctx, max_items=1):
+def citations_from_context(ctx, query="", max_items=3):
+    if not query:
+        query = ""
+    query_terms = set(tokenise(query.lower()))
     blocks = []
     for i, c in enumerate(ctx[:max_items], start=1):
         heading = c.get("heading") or "Bez nadpisu"
         subheading = c.get("subheading") or ""
-        text = c.get("text", "").strip()
-        if not text:
+        full_text = c.get("text", "").strip()
+        if not full_text:
+            continue
+        # Filter sentences that contain query terms
+        sentences = extract_sentences(full_text)
+        relevant_sentences = [
+            s for s in sentences
+            if any(term in s.lower() for term in query_terms) or not query_terms
+        ]
+        if not relevant_sentences:
+            relevant_sentences = sentences[:3]  # Fallback to first 3 sentences
+        filtered_text = " ".join(relevant_sentences)
+        if not filtered_text:
             continue
         block = [f"[CITACE {i}]", f"Nadpis: {heading}"]
         if subheading:
             block.append(f"Podnadpis: {subheading}")
         block.append("Text:")
-        block.append(text)
+        block.append(filtered_text)
         blocks.append("\n".join(block))
     return "\n\n" + ("\n\n" + ("-" * 72) + "\n\n").join(blocks) if blocks else ""
 
@@ -1707,13 +1721,14 @@ def inject_design():
 
         [data-baseweb="select"] .material-symbols-rounded::after,
         [data-baseweb="select"] .material-symbols-outlined::after {
-            content: "▾";
-            font-size: 12px;
+            content: "▼";
+            font-size: 14px;
             color: var(--accent);
             position: absolute;
             inset: -1px 0 0 0;
             text-align: center;
             font-weight: bold;
+            font-family: Arial, sans-serif;
         }
 
         textarea:focus,
@@ -1934,6 +1949,50 @@ def inject_design():
                 font-size: 1.8rem;
             }
         }
+
+        /* Fix for Material Symbols icons */
+        .material-symbols-outlined,
+        .material-symbols-rounded,
+        .material-symbols-sharp {
+            font-family: "Material Symbols Outlined" !important;
+            font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24 !important;
+            color: inherit;
+        }
+
+        .material-symbols-outlined::before,
+        .material-symbols-rounded::before,
+        .material-symbols-sharp::before {
+            content: attr(data-icon);
+            font-family: "Material Symbols Outlined";
+            font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+        }
+
+        /* Hide text for icons */
+        .material-symbols-outlined,
+        .material-symbols-rounded,
+        .material-symbols-sharp {
+            overflow: hidden;
+            white-space: nowrap;
+            text-indent: 100%;
+            width: 24px;
+            height: 24px;
+            display: inline-block;
+            position: relative;
+        }
+
+        .material-symbols-outlined::before,
+        .material-symbols-rounded::before,
+        .material-symbols-sharp::before {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            text-indent: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2112,8 +2171,9 @@ if prompt := st.chat_input("Napiš dotaz k dokumentu..."):
 TEXT je relevantní výběr z dokumentu. Může být v češtině nebo ve slovenštině.
 Použij pouze věty v části TEXT. Nevymýšlej.
 Projdi celý dodaný TEXT a najdi všechny pasáže, které odpovídají na otázku.
-Napiš úplnou, koherentní odpověď v češtině, která pokrývá všechny relevantní informace bez omezení délky.
-Shrň informace z TEXTU do logického, čitelného textu, který odpovídá na otázku.
+Napiš inteligentní, užitečnou odpověď v češtině, která přímo odpovídá na otázku uživatele.
+Použij informace z TEXTU k vytvoření logické, koherentní odpovědi, která vysvětluje a odpovídá na dotaz.
+Nejen shrň, ale interpretuj a vysvětli informace z dokumentu.
 Uveď, ze kterých sekcí nebo nadpisů je odpověď čerpána, pokud to je možné.
 Nepřidávej informace z jiných zdrojů.
 Pokud je v TEXT alespoň jedna relevantní pasáž, nikdy nepiš "V dostupném textu to není uvedeno.".
@@ -2162,7 +2222,7 @@ Otázka: {prompt}
                 "mode": "summary_plus_explicit_citations",
             }
 
-            citations = citations_from_context(ctx).strip()
+            citations = citations_from_context(ctx, prompt).strip()
             if citations and (
                 "v dostupném textu to není uvedeno" in summary.lower()
                 or len(summary) < 40
