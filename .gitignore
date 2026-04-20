@@ -1,0 +1,6 @@
+backend/.env
+frontend/.env
+.env
+backend/venv/
+node_modules/
+frontend/.next/
