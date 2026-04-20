@@ -26,7 +26,7 @@ export default function AdminPage() {
   /* ================= LOAD ================= */
 
   const loadFiles = async () => {
-    const res = await fetch(`${api}/admin/documents`, {
+    const res = await fetch(`${api}/api/v1/admin/documents`, {
       credentials: "include",
     });
 
@@ -45,7 +45,7 @@ export default function AdminPage() {
 
   const checkAuth = async () => {
     try {
-      const res = await fetch(`${api}/admin/me`, {
+      const res = await fetch(`${api}/api/v1/admin/me`, {
         credentials: "include",
       });
 
@@ -79,7 +79,7 @@ export default function AdminPage() {
       setLoading(true);
       setError("");
 
-      const res = await fetch(`${api}/admin/login`, {
+      const res = await fetch(`${api}/api/v1/admin/login`, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -109,7 +109,7 @@ export default function AdminPage() {
   };
 
   const logout = async () => {
-    await fetch(`${api}/admin/logout`, {
+    await fetch(`${api}/api/v1/admin/logout`, {
       method: "POST",
       credentials: "include",
     });
@@ -124,7 +124,7 @@ export default function AdminPage() {
   const addInsurer = async () => {
     if (!newInsurer.trim()) return;
 
-    await fetch(`${api}/admin/insurers`, {
+    await fetch(`${api}/api/v1/admin/insurers`, {
       method: "POST",
       credentials: "include",
       headers: {
