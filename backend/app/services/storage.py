@@ -1,94 +1,154 @@
-import json
-import os
 from typing import List, Dict, Any
+from app.supabase_client import supabase
 
-# jednoduché file-based úložiště
-BASE_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
 
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-DATA_FILE = os.path.join(
-    UPLOAD_DIR,
-    "documents.json"
-)
-
-INSURERS_FILE = os.path.join(
-    UPLOAD_DIR,
-    "insurers.json"
-)
+# ==================================================
+# BACKWARD-COMPATIBLE STORAGE LAYER (Supabase)
+# Zachovává stejné funkce/signatury jako původní file storage
+# ==================================================
 
 
 # =========================
-# FILE HELPERS
+# INTERNAL HELPERS
 # =========================
+def _safe(value, default=None):
+    return value if value is not None else default
+
+
+def _slugify(name: str) -> str:
+    return (
+        name.strip()
+        .lower()
+        .replace(" ", "-")
+        .replace("/", "-")
+    )
+
+
+# --------------------------------------------------
+# LEGACY HELPERS (kvůli kompatibilitě se starým kódem)
+# --------------------------------------------------
 def _ensure_files():
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-    if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
-
-    if not os.path.exists(INSURERS_FILE):
-        with open(INSURERS_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
+    # už není potřeba, necháváme kvůli kompatibilitě
+    return
 
 
 def _read_json(path: str):
-    _ensure_files()
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    # legacy fallback
+    return []
 
 
 def _write_json(path: str, data):
-    _ensure_files()
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
+    # legacy fallback
+    return
 
 
 # =========================
 # DOCUMENTS
 # =========================
 def _read_all():
-    return _read_json(DATA_FILE)
+    """
+    Vrací stejné pole dictů jako původní documents.json
+    """
+    result = (
+        supabase
+        .table("documents")
+        .select("*")
+        .order("created_at", desc=False)
+        .execute()
+    )
+
+    rows = []
+
+    for row in result.data or []:
+        rows.append({
+            "insurer": _safe(row.get("insurer_name"), ""),
+            "document_title": _safe(row.get("title"), ""),
+            "file_name": _safe(row.get("file_name"), ""),
+            "text_content": _safe(row.get("extracted_text"), ""),
+            "chunks": _safe(row.get("chunks"), []),
+        })
+
+    return rows
 
 
 def _write_all(data):
-    _write_json(DATA_FILE, data)
+    """
+    Kompatibilita pro starý remove_old_record().
+    Přepíše documents tabulku podle dodaných dat.
+    """
+    # smaž vše
+    supabase.table("documents").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+
+    # vlož znovu
+    for doc in data:
+        add_document(doc)
 
 
 def add_document(doc):
-    data = _read_all()
-    data.append(doc)
-    _write_all(data)
+    """
+    Zachovává starý vstupní formát:
+    {
+      insurer,
+      document_title,
+      file_name,
+      text_content,
+      chunks
+    }
+    """
+    insurer = doc.get("insurer", "").strip()
+
+    payload = {
+        "insurer_name": insurer,
+        "title": doc.get("document_title", ""),
+        "file_name": doc.get("file_name", ""),
+        "storage_path": doc.get("file_name", ""),
+        "extracted_text": doc.get("text_content", ""),
+        "chunks": doc.get("chunks", []),
+    }
+
+    # duplicita dle file_name -> smaž starý záznam
+    if payload["file_name"]:
+        supabase.table("documents").delete().eq(
+            "file_name",
+            payload["file_name"]
+        ).execute()
+
+    supabase.table("documents").insert(payload).execute()
+
+    # pokud insurer existuje, automaticky ho zapiš i do insurers
+    if insurer:
+        add_insurer(insurer)
 
 
 def get_documents(
     insurer: str = None
 ) -> List[Dict[str, Any]]:
-    data = _read_all()
+
+    query = supabase.table("documents").select("*")
 
     if insurer:
-        data = [
-            d for d in data
-            if d.get("insurer") == insurer
-        ]
+        query = query.eq("insurer_name", insurer)
 
-    return data
+    result = query.order("created_at", desc=False).execute()
+
+    rows = []
+
+    for row in result.data or []:
+        rows.append({
+            "insurer": _safe(row.get("insurer_name"), ""),
+            "document_title": _safe(row.get("title"), ""),
+            "file_name": _safe(row.get("file_name"), ""),
+            "text_content": _safe(row.get("extracted_text"), ""),
+            "chunks": _safe(row.get("chunks"), []),
+        })
+
+    return rows
 
 
 def get_documents_titles(
     insurer: str
 ) -> List[str]:
+
     data = get_documents(insurer)
 
     titles = list({
@@ -104,24 +164,31 @@ def get_documents_titles(
 # INSURERS
 # =========================
 def get_insurers() -> List[str]:
-    docs = _read_all()
-    saved = _read_json(INSURERS_FILE)
+    """
+    Stejné chování jako dříve:
+    union insurers tabulky + insurers z dokumentů
+    """
+    result = (
+        supabase
+        .table("insurers")
+        .select("name")
+        .order("name")
+        .execute()
+    )
+
+    from_table = {
+        row["name"]
+        for row in (result.data or [])
+        if row.get("name")
+    }
 
     from_docs = {
         d.get("insurer")
-        for d in docs
+        for d in get_documents()
         if d.get("insurer")
     }
 
-    from_saved = {
-        item
-        for item in saved
-        if item
-    }
-
-    return sorted(
-        list(from_docs | from_saved)
-    )
+    return sorted(list(from_table | from_docs))
 
 
 def add_insurer(name: str):
@@ -130,28 +197,14 @@ def add_insurer(name: str):
     if not name:
         return
 
-    data = _read_json(INSURERS_FILE)
-
-    if name not in data:
-        data.append(name)
-
-    data = sorted(list(set(data)))
-
-    _write_json(
-        INSURERS_FILE,
-        data
-    )
+    supabase.table("insurers").upsert({
+        "name": name,
+        "slug": _slugify(name),
+    }).execute()
 
 
 def delete_insurer(name: str):
-    data = _read_json(INSURERS_FILE)
-
-    data = [
-        item for item in data
-        if item != name
-    ]
-
-    _write_json(
-        INSURERS_FILE,
-        data
-    )
+    supabase.table("insurers").delete().eq(
+        "name",
+        name
+    ).execute()
