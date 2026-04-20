@@ -28,17 +28,14 @@ def _slugify(name: str) -> str:
 # LEGACY HELPERS (kvůli kompatibilitě se starým kódem)
 # --------------------------------------------------
 def _ensure_files():
-    # už není potřeba, necháváme kvůli kompatibilitě
     return
 
 
 def _read_json(path: str):
-    # legacy fallback
     return []
 
 
 def _write_json(path: str, data):
-    # legacy fallback
     return
 
 
@@ -76,10 +73,11 @@ def _write_all(data):
     Kompatibilita pro starý remove_old_record().
     Přepíše documents tabulku podle dodaných dat.
     """
-    # smaž vše
-    supabase.table("documents").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    supabase.table("documents").delete().neq(
+        "id",
+        "00000000-0000-0000-0000-000000000000"
+    ).execute()
 
-    # vlož znovu
     for doc in data:
         add_document(doc)
 
@@ -106,7 +104,7 @@ def add_document(doc):
         "chunks": doc.get("chunks", []),
     }
 
-    # duplicita dle file_name -> smaž starý záznam
+    # duplicita dle file_name
     if payload["file_name"]:
         supabase.table("documents").delete().eq(
             "file_name",
@@ -115,7 +113,7 @@ def add_document(doc):
 
     supabase.table("documents").insert(payload).execute()
 
-    # pokud insurer existuje, automaticky ho zapiš i do insurers
+    # automaticky založ insurer
     if insurer:
         add_insurer(insurer)
 
@@ -192,12 +190,28 @@ def get_insurers() -> List[str]:
 
 
 def add_insurer(name: str):
+    """
+    Bezpečné vložení pro admin panel.
+    Funguje spolehlivěji než upsert.
+    """
     name = name.strip()
 
     if not name:
         return
 
-    supabase.table("insurers").upsert({
+    existing = (
+        supabase
+        .table("insurers")
+        .select("id")
+        .eq("name", name)
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        return
+
+    supabase.table("insurers").insert({
         "name": name,
         "slug": _slugify(name),
     }).execute()
