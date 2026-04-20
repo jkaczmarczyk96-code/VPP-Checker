@@ -369,7 +369,7 @@ export default function Home() {
                 </div>
 
                 {/* SOURCES */}
-                {msg.role === "ai" && msg.sources?.length > 0 && (
+               (msg.sources?.length ?? 0) > 0
                   <div className="mt-4 space-y-2">
                     {msg.sources.map((s, i) => (
                       <details
