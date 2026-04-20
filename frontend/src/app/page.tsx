@@ -369,9 +369,9 @@ export default function Home() {
                 </div>
 
                 {/* SOURCES */}
-               (msg.sources?.length ?? 0) > 0
+                {msg.role === "ai" && (msg.sources?.length ?? 0) > 0 && (
                   <div className="mt-4 space-y-2">
-                    {msg.sources.map((s, i) => (
+                    {msg.sources?.map((s, i) => (
                       <details
                         key={i}
                         className="rounded-xl border border-zinc-800 bg-zinc-950 p-3"
