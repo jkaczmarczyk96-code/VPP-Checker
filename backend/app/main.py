@@ -4,6 +4,8 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from supabase_client import supabase
+
 from app.routes.health import router as health_router
 from app.routes.chat import router as chat_router
 from app.routes.upload import router as upload_router
@@ -36,4 +38,9 @@ app.include_router(
     feedback_router,
     prefix="/api/v1/feedback",
     tags=["feedback"]
+
+    @app.get("/health-db")
+    def health_db():
+        result = supabase.table("insurers").select("*").limit(1).execute()
+        return {"ok": True, "data": result.data}
 )
