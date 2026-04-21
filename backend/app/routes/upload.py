@@ -1,4 +1,5 @@
 from pathlib import Path
+from io import BytesIO
 from app.services.chunking import chunk_text
 import os
 import re
@@ -16,6 +17,7 @@ from docx import Document
 from docx.shared import Pt
 from pypdf import PdfReader
 
+from app.supabase_client import supabase
 from app.services.search import set_document_text
 from app.services.storage import (
     add_document,
@@ -28,27 +30,8 @@ router = APIRouter(
     tags=["Upload"]
 )
 
-# =========================
-# PATH SETUP
-# =========================
-BASE_DIR = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        ".."
-    )
-)
-
-UPLOAD_DIR = Path(
-    os.path.join(BASE_DIR, "uploads")
-)
-
-UPLOAD_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
 COOKIE_NAME = "vpp_admin_session"
+BUCKET = "documents"
 
 
 # =========================
@@ -70,9 +53,7 @@ def require_admin(
 # =========================
 # HELPERS
 # =========================
-def sanitize_filename(
-    filename: str
-) -> str:
+def sanitize_filename(filename: str) -> str:
     filename = filename.strip()
     filename = filename.replace(" ", "_")
     filename = re.sub(
@@ -80,7 +61,6 @@ def sanitize_filename(
         "",
         filename
     )
-
     return filename
 
 
@@ -101,7 +81,6 @@ def looks_like_part(text: str) -> bool:
         r"^(Část|Časť|Oddíl|Oddiel|Sekce|Kapitola|Hlava)\b",
         r"^\d+\.\s+[A-ZÁČĎÉĚÍĹĽŇÓÔŘŠŤÚŮÝŽ]",
     ]
-
     return any(
         re.search(p, text, re.IGNORECASE)
         for p in patterns
@@ -109,13 +88,12 @@ def looks_like_part(text: str) -> bool:
 
 
 def looks_like_article(text: str) -> bool:
-    patterns = [
-        r"^(Článek|Článok|Čl\.)\s*\d+",
-    ]
-
-    return any(
-        re.search(p, text, re.IGNORECASE)
-        for p in patterns
+    return bool(
+        re.search(
+            r"^(Článek|Článok|Čl\.)\s*\d+",
+            text,
+            re.IGNORECASE
+        )
     )
 
 
@@ -126,19 +104,14 @@ def looks_like_short_heading(text: str) -> bool:
     if text.endswith(";"):
         return False
 
-    if len(text.split()) <= 8:
-        return True
-
-    return False
+    return len(text.split()) <= 8
 
 
 # =========================
-# VISUAL NORMALIZER
+# DOCX NORMALIZER
 # =========================
-def normalize_docx(
-    file_path: Path
-):
-    doc = Document(file_path)
+def normalize_docx_bytes(content: bytes) -> bytes:
+    doc = Document(BytesIO(content))
 
     for p in doc.paragraphs:
         text = p.text.strip()
@@ -146,73 +119,50 @@ def normalize_docx(
         if not text:
             continue
 
-        # PART / SECTION
         if looks_like_part(text):
             format_paragraph(
-                p,
-                size=14,
-                bold=True
+                p, 14, bold=True
             )
 
-        # ARTICLE
         elif looks_like_article(text):
             format_paragraph(
-                p,
-                size=13,
-                bold=True
+                p, 13, bold=True
             )
 
-        # SHORT TITLES
         elif looks_like_short_heading(text):
             format_paragraph(
-                p,
-                size=12,
-                bold=True
+                p, 12, bold=True
             )
 
-        # BODY TEXT
         else:
             format_paragraph(
-                p,
-                size=11,
-                bold=False
+                p, 11
             )
 
-    doc.save(file_path)
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.read()
 
 
-# =========================
-# DOCX PARSER
-# =========================
-def parse_docx(
-    file_path: Path
-) -> str:
-    # 1 normalize first
-    normalize_docx(file_path)
+def parse_docx(content: bytes) -> str:
+    normalized = normalize_docx_bytes(content)
 
-    # 2 re-open normalized file
-    doc = Document(file_path)
+    doc = Document(BytesIO(normalized))
 
     lines = []
 
     for p in doc.paragraphs:
         text = p.text.strip()
 
-        if not text:
-            continue
-
-        lines.append(text)
+        if text:
+            lines.append(text)
 
     return "\n".join(lines)
 
 
-# =========================
-# PDF PARSER
-# =========================
-def parse_pdf(
-    file_path: Path
-) -> str:
-    reader = PdfReader(str(file_path))
+def parse_pdf(content: bytes) -> str:
+    reader = PdfReader(BytesIO(content))
 
     pages = []
 
@@ -230,18 +180,22 @@ def parse_pdf(
     return "\n\n".join(pages)
 
 
-def remove_old_record(
-    filename: str
-):
+def remove_old_record(filename: str):
     docs = get_documents()
 
     docs = [
         d for d in docs
-        if d.get("file_name")
-        != filename
+        if d.get("file_name") != filename
     ]
 
     _write_all(docs)
+
+    try:
+        supabase.storage.from_(BUCKET).remove(
+            [filename]
+        )
+    except Exception:
+        pass
 
 
 # =========================
@@ -249,20 +203,14 @@ def remove_old_record(
 # =========================
 @router.get("/")
 async def list_files():
-    files = []
-
-    for file in UPLOAD_DIR.iterdir():
-        if (
-            file.is_file()
-            and file.name
-            != "documents.json"
-            and file.name
-            != "insurers.json"
-        ):
-            files.append(file.name)
+    docs = get_documents()
 
     return {
-        "files": sorted(files)
+        "files": sorted([
+            d.get("file_name")
+            for d in docs
+            if d.get("file_name")
+        ])
     }
 
 
@@ -303,45 +251,46 @@ async def upload_file(
             detail="Neplatný název souboru."
         )
 
-    file_path = UPLOAD_DIR / safe_name
-
-    filename_lower = (
-        safe_name.lower()
-    )
+    filename_lower = safe_name.lower()
 
     if not (
         filename_lower.endswith(".pdf")
-        or filename_lower.endswith(
-            ".docx"
-        )
+        or filename_lower.endswith(".docx")
     ):
         raise HTTPException(
             status_code=400,
             detail="Podporován je pouze DOCX nebo PDF."
         )
 
-    remove_old_record(safe_name)
-
-    if file_path.exists():
-        file_path.unlink()
-
     content = await file.read()
 
-    with open(
-        file_path,
-        "wb"
-    ) as f:
-        f.write(content)
+    remove_old_record(safe_name)
 
     # =====================
-    # PARSE
+    # Upload do Supabase Storage
     # =====================
-    if filename_lower.endswith(
-        ".docx"
-    ):
-        text = parse_docx(file_path)
+    try:
+        supabase.storage.from_(BUCKET).upload(
+            path=safe_name,
+            file=content,
+            file_options={
+                "content-type": file.content_type,
+                "upsert": "true"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload failed: {str(e)}"
+        )
+
+    # =====================
+    # Parse
+    # =====================
+    if filename_lower.endswith(".docx"):
+        text = parse_docx(content)
     else:
-        text = parse_pdf(file_path)
+        text = parse_pdf(content)
 
     if not text.strip():
         raise HTTPException(
@@ -350,7 +299,7 @@ async def upload_file(
         )
 
     # =====================
-    # CONTEXT + CHUNKS
+    # Chunks
     # =====================
     set_document_text(text)
 
@@ -358,8 +307,7 @@ async def upload_file(
 
     add_document({
         "insurer": insurer.strip(),
-        "document_title":
-            document_title.strip(),
+        "document_title": document_title.strip(),
         "file_name": safe_name,
         "text_content": text,
         "chunks": chunks
@@ -368,12 +316,10 @@ async def upload_file(
     return {
         "filename": safe_name,
         "insurer": insurer,
-        "document_title":
-            document_title,
+        "document_title": document_title,
         "status": "uploaded",
         "chunks": len(chunks),
-        "text_preview":
-            text[:300]
+        "text_preview": text[:300]
     }
 
 
@@ -393,11 +339,6 @@ async def delete_file(
     safe_name = sanitize_filename(
         filename
     )
-
-    file_path = UPLOAD_DIR / safe_name
-
-    if file_path.exists():
-        file_path.unlink()
 
     remove_old_record(safe_name)
 
