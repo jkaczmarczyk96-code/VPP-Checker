@@ -11,6 +11,7 @@ from app.routes.chat import router as chat_router
 from app.routes.upload import router as upload_router
 from app.routes.admin import router as admin_router
 from app.routes.feedback import router as feedback_router
+from app.routes.public import router as public_router
 
 app = FastAPI(
     title="VPP Checker API",
@@ -34,6 +35,7 @@ app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(upload_router)
 app.include_router(admin_router)
+app.include_router(public_router)
 
 app.include_router(
     feedback_router,
