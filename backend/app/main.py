@@ -16,7 +16,6 @@ from app.routes.public import router as public_router
 app = FastAPI(
     title="VPP Checker API",
     version="1.0.0",
-    redirect_slashes=False
 )
 
 app.add_middleware(
