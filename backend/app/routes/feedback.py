@@ -2,18 +2,19 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.supabase_client import supabase
 
-router = APIRouter()
+router = APIRouter(prefix="", tags=["feedback"])
 
 
 class FeedbackRequest(BaseModel):
-    question: str
-    answer: str
-    rating: str
+    question: str = ""
+    answer: str = ""
+    rating: str = ""
     comment: str = ""
     insurer: str = ""
     document_title: str = ""
 
 
+@router.get("")
 @router.get("/")
 def get_feedback():
     try:
@@ -35,6 +36,7 @@ def get_feedback():
         )
 
 
+@router.post("")
 @router.post("/")
 def save_feedback(data: FeedbackRequest):
     try:
@@ -47,7 +49,7 @@ def save_feedback(data: FeedbackRequest):
                 "rating": data.rating,
                 "comment": data.comment,
                 "insurer": data.insurer,
-                "document_title": data.document_title
+                "document_title": data.document_title,
             })
             .execute()
         )
