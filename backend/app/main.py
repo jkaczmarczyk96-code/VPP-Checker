@@ -32,12 +32,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ROUTES
 app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(upload_router)
 app.include_router(admin_router)
+
+# public.py už má vlastní prefix
 app.include_router(public_router)
 
+# feedback.py prefix přidáváme zde
 app.include_router(
     feedback_router,
     prefix="/api/v1/feedback",
