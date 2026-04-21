@@ -22,6 +22,8 @@ export default function AdminPage() {
 
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [savingInsurer, setSavingInsurer] = useState(false);
 
   /* ================= LOAD ================= */
 
@@ -124,36 +126,48 @@ export default function AdminPage() {
   const addInsurer = async () => {
     if (!newInsurer.trim()) return;
 
-    await fetch(`${api}/api/v1/admin/insurers`, {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: newInsurer,
-      }),
-    });
+    try {
+      setSavingInsurer(true);
 
-    setNewInsurer("");
-    await loadInsurers();
-    setMessage("Pojišťovna přidána.");
+      await fetch(`${api}/api/v1/admin/insurers`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: newInsurer,
+        }),
+      });
+
+      setNewInsurer("");
+      await loadInsurers();
+      setMessage("Pojišťovna přidána.");
+    } catch {
+      setMessage("Nepodařilo se přidat pojišťovnu.");
+    }
+
+    setSavingInsurer(false);
   };
 
   const deleteInsurer = async () => {
     if (!insurer) return;
 
-    await fetch(
-      `${api}/api/v1/admin/insurers/${encodeURIComponent(insurer)}`,
-      {
-        method: "DELETE",
-        credentials: "include",
-      }
-    );
+    try {
+      await fetch(
+        `${api}/api/v1/admin/insurers/${encodeURIComponent(insurer)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+        }
+      );
 
-    setInsurer("");
-    await loadInsurers();
-    setMessage("Pojišťovna smazána.");
+      setInsurer("");
+      await loadInsurers();
+      setMessage("Pojišťovna smazána.");
+    } catch {
+      setMessage("Mazání pojišťovny selhalo.");
+    }
   };
 
   const uploadFile = async () => {
@@ -172,28 +186,43 @@ export default function AdminPage() {
       return;
     }
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("insurer", insurer);
-    formData.append("document_title", documentTitle);
+    try {
+      setUploading(true);
+      setMessage("Nahrávám dokument...");
 
-    const res = await fetch(`${api}/api/v1/upload`, {
-      method: "POST",
-      credentials: "include",
-      body: formData,
-    });
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("insurer", insurer);
+      formData.append("document_title", documentTitle);
 
-    const data = await res.json();
+      const res = await fetch(`${api}/api/v1/upload`, {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
 
-    if (res.ok) {
+      const data = await res.json();
+
+      console.log("UPLOAD RESPONSE:", data);
+
+      if (!res.ok) {
+        setMessage(data.detail || "Chyba uploadu.");
+        setUploading(false);
+        return;
+      }
+
       setMessage("Soubor úspěšně nahrán.");
       setDocumentTitle("");
       setFile(null);
+
       await loadFiles();
       await loadInsurers();
-    } else {
-      setMessage(data.detail || "Chyba uploadu.");
+    } catch (error) {
+      console.error(error);
+      setMessage("Upload selhal.");
     }
+
+    setUploading(false);
   };
 
   const deleteFile = async (filename: string) => {
@@ -203,16 +232,20 @@ export default function AdminPage() {
 
     if (!confirmed) return;
 
-    const res = await fetch(`${api}/api/v1/upload/${filename}`, {
-      method: "DELETE",
-      credentials: "include",
-    });
+    try {
+      const res = await fetch(`${api}/api/v1/upload/${filename}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
 
-    if (res.ok) {
-      setMessage("Soubor smazán.");
-      await loadFiles();
-      await loadInsurers();
-    } else {
+      if (res.ok) {
+        setMessage("Soubor smazán.");
+        await loadFiles();
+        await loadInsurers();
+      } else {
+        setMessage("Mazání se nepodařilo.");
+      }
+    } catch {
       setMessage("Mazání se nepodařilo.");
     }
   };
@@ -248,7 +281,8 @@ export default function AdminPage() {
 
             <button
               onClick={handleLogin}
-              className="mt-4 bg-white text-black px-6 py-3 rounded-xl"
+              disabled={loading}
+              className="mt-4 bg-white text-black px-6 py-3 rounded-xl active:scale-95 transition disabled:opacity-50"
             >
               {loading
                 ? "Přihlašuji..."
@@ -271,7 +305,6 @@ export default function AdminPage() {
       <div className="max-w-6xl mx-auto">
         <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8">
 
-          {/* HEADER */}
           <div className="flex justify-between items-center mb-8">
             <h1 className="text-4xl font-semibold">
               Admin panel
@@ -280,14 +313,14 @@ export default function AdminPage() {
             <div className="flex gap-3">
               <Link
                 href="/admin/feedback"
-                className="bg-zinc-800 hover:bg-zinc-700 px-5 py-2 rounded-xl"
+                className="bg-zinc-800 hover:bg-zinc-700 px-5 py-2 rounded-xl transition"
               >
                 Feedback
               </Link>
 
               <button
                 onClick={logout}
-                className="bg-white text-black px-5 py-2 rounded-xl"
+                className="bg-white text-black px-5 py-2 rounded-xl active:scale-95 transition"
               >
                 Odhlásit
               </button>
@@ -324,7 +357,7 @@ export default function AdminPage() {
 
               <button
                 onClick={deleteInsurer}
-                className="border border-zinc-700 px-5 py-3 rounded-xl"
+                className="border border-zinc-700 px-5 py-3 rounded-xl active:scale-95 transition"
               >
                 Smazat
               </button>
@@ -343,9 +376,12 @@ export default function AdminPage() {
 
               <button
                 onClick={addInsurer}
-                className="bg-white text-black px-5 py-3 rounded-xl"
+                disabled={savingInsurer}
+                className="bg-white text-black px-5 py-3 rounded-xl active:scale-95 transition disabled:opacity-50"
               >
-                Přidat
+                {savingInsurer
+                  ? "Ukládám..."
+                  : "Přidat"}
               </button>
             </div>
           </div>
@@ -403,11 +439,20 @@ export default function AdminPage() {
                 className="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-4 py-3"
               />
 
+              {uploading && (
+                <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
+                  <div className="h-full bg-white animate-pulse w-2/3" />
+                </div>
+              )}
+
               <button
                 onClick={uploadFile}
-                className="bg-white text-black px-6 py-3 rounded-xl"
+                disabled={uploading}
+                className="bg-white text-black px-6 py-3 rounded-xl active:scale-95 transition disabled:opacity-50"
               >
-                Nahrát soubor
+                {uploading
+                  ? "Nahrávám..."
+                  : "Nahrát soubor"}
               </button>
             </div>
           </div>
@@ -447,7 +492,7 @@ export default function AdminPage() {
                     onClick={() =>
                       deleteFile(item.file_name)
                     }
-                    className="mt-3 border border-zinc-700 px-4 py-2 rounded-xl"
+                    className="mt-3 border border-zinc-700 px-4 py-2 rounded-xl active:scale-95 transition"
                   >
                     Smazat
                   </button>
