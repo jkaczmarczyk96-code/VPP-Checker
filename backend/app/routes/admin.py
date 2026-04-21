@@ -104,12 +104,15 @@ def list_insurers(
 
 @router.post("/insurers")
 def add_insurer(
+    
     data: InsurerRequest,
     session: str = Cookie(
         default=None,
         alias=COOKIE_NAME
     )
 ):
+    print("ADMIN ADD INSURER ROUTE HIT")
+
     require_admin(session)
 
     name = data.name.strip()
