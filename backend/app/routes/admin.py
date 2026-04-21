@@ -65,8 +65,10 @@ def admin_login(
         key=COOKIE_NAME,
         value="logged_in",
         httponly=True,
-        samesite="lax"
-    )
+        secure=True,
+        samesite="none",
+        max_age=60 * 60 * 24 * 7
+    )   
 
     return {"success": True}
 
