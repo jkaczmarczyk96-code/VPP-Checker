@@ -107,7 +107,7 @@ export default function Home() {
   async function loadInsurers() {
     try {
       const res = await fetch(
-        `${api}/api/v1/public/insurers/`
+        `${api}/api/v1/public/insurers`
       );
 
       const data = await res.json();
@@ -199,7 +199,7 @@ export default function Home() {
 
     try {
       const res = await fetch(
-        `${api}/api/v1/chat/`,
+        `${api}/api/v1/chat`,
         {
           method: "POST",
           headers: {
@@ -294,12 +294,11 @@ export default function Home() {
       setFeedbackLoading(index);
 
       await fetch(
-        `${api}/api/v1/feedback/`,
+        `${api}/api/v1/feedback`,
         {
           method: "POST",
           headers: {
-            "Content-Type":
-              "application/json",
+            "Content-Type":"application/json",
           },
           body: JSON.stringify({
             question:
