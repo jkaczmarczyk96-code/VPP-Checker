@@ -75,7 +75,14 @@ export default function Home() {
   const [feedbackComment, setFeedbackComment] =
     useState("");
 
+  const [toast, setToast] =
+    useState("");
+
+  const [feedbackLoading, setFeedbackLoading] =
+    useState<number | null>(null);
+
   const chatRef = useRef<HTMLDivElement>(null);
+
   const textareaRef =
     useRef<HTMLTextAreaElement>(null);
 
@@ -112,6 +119,7 @@ export default function Home() {
       );
     } catch (e) {
       console.error(e);
+
       setError(
         "Nepodařilo se načíst pojišťovny."
       );
@@ -154,6 +162,7 @@ export default function Home() {
       setDocuments(titles);
     } catch (e) {
       console.error(e);
+
       setError(
         "Nepodařilo se načíst dokumenty."
       );
@@ -252,6 +261,16 @@ export default function Home() {
     }
   }
 
+  /* ================= TOAST ================= */
+
+  function showToast(text: string) {
+    setToast(text);
+
+    setTimeout(() => {
+      setToast("");
+    }, 1800);
+  }
+
   /* ================= FEEDBACK ================= */
 
   async function sendFeedback(
@@ -259,15 +278,21 @@ export default function Home() {
     rating: "up" | "down",
     comment = ""
   ) {
-    if (ratedIndexes.includes(index)) {
+    if (
+      ratedIndexes.includes(index) ||
+      feedbackLoading === index
+    ) {
       return;
     }
 
     const aiMessage = messages[index];
+
     const userMessage =
       messages[index - 1];
 
     try {
+      setFeedbackLoading(index);
+
       await fetch(
         `${api}/api/v1/feedback`,
         {
@@ -297,8 +322,20 @@ export default function Home() {
 
       setOpenCommentIndex(null);
       setFeedbackComment("");
+
+      showToast(
+        rating === "up"
+          ? "Děkujeme za feedback."
+          : "Feedback byl odeslán."
+      );
     } catch (e) {
       console.error(e);
+
+      showToast(
+        "Feedback se nepodařilo odeslat."
+      );
+    } finally {
+      setFeedbackLoading(null);
     }
   }
 
@@ -311,6 +348,8 @@ export default function Home() {
     );
 
     setCopiedIndex(index);
+
+    showToast("Zkopírováno.");
 
     setTimeout(() => {
       setCopiedIndex(null);
@@ -437,30 +476,41 @@ export default function Home() {
                       <div className="flex gap-3">
 
                         <button
-                          disabled={ratedIndexes.includes(
-                            index
-                          )}
+                          disabled={
+                            ratedIndexes.includes(
+                              index
+                            ) ||
+                            feedbackLoading ===
+                              index
+                          }
                           onClick={() =>
                             sendFeedback(
                               index,
                               "up"
                             )
                           }
-                          className="hover:text-white disabled:opacity-40"
+                          className="hover:text-white disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 transition"
                         >
-                          👍
+                          {feedbackLoading ===
+                          index
+                            ? "..."
+                            : "👍"}
                         </button>
 
                         <button
-                          disabled={ratedIndexes.includes(
-                            index
-                          )}
+                          disabled={
+                            ratedIndexes.includes(
+                              index
+                            ) ||
+                            feedbackLoading ===
+                              index
+                          }
                           onClick={() =>
                             setOpenCommentIndex(
                               index
                             )
                           }
-                          className="hover:text-white disabled:opacity-40"
+                          className="hover:text-white disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 transition"
                         >
                           👎
                         </button>
@@ -472,7 +522,7 @@ export default function Home() {
                               index
                             )
                           }
-                          className="hover:text-white"
+                          className="hover:text-white active:scale-95 transition"
                         >
                           {copiedIndex ===
                           index
@@ -559,6 +609,10 @@ export default function Home() {
                       />
 
                       <button
+                        disabled={
+                          feedbackLoading ===
+                          index
+                        }
                         onClick={() =>
                           sendFeedback(
                             index,
@@ -566,7 +620,7 @@ export default function Home() {
                             feedbackComment
                           )
                         }
-                        className="bg-white text-black px-4 py-2 rounded-xl text-sm active:scale-95 transition"
+                        className="bg-white text-black px-4 py-2 rounded-xl text-sm active:scale-95 transition disabled:opacity-40"
                       >
                         Odeslat feedback
                       </button>
@@ -628,6 +682,12 @@ export default function Home() {
         </footer>
 
       </div>
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-2xl bg-white text-black px-5 py-3 text-sm shadow-xl">
+          {toast}
+        </div>
+      )}
     </main>
   );
 }
