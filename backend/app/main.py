@@ -15,7 +15,8 @@ from app.routes.public import router as public_router
 
 app = FastAPI(
     title="VPP Checker API",
-    version="1.0.0"
+    version="1.0.0",
+    redirect_slashes=False
 )
 
 app.add_middleware(
@@ -43,7 +44,24 @@ app.include_router(
     tags=["feedback"]
 )
 
+@app.get("/")
+def root():
+    return {
+        "ok": True,
+        "app": "VPP Checker API"
+    }
+
 @app.get("/health-db")
 def health_db():
-    result = supabase.table("insurers").select("*").limit(1).execute()
-    return {"ok": True, "data": result.data}
+    result = (
+        supabase
+        .table("insurers")
+        .select("*")
+        .limit(1)
+        .execute()
+    )
+
+    return {
+        "ok": True,
+        "data": result.data
+    }
