@@ -10,13 +10,11 @@ router = APIRouter(
     tags=["Public"]
 )
 
-
 @router.get("/insurers")
 def public_insurers():
     return {
         "insurers": get_insurers()
     }
-
 
 @router.get("/documents")
 def public_documents(
@@ -29,12 +27,24 @@ def public_documents(
     return {
         "documents": [
             {
-                "document_title":
-                    d.get(
-                        "document_title",
-                        ""
-                    )
+                "document_title": d.get(
+                    "document_title",
+                    ""
+                )
             }
             for d in docs
         ]
     }
+
+# kompatibilita bez trailing slash
+@router.get("/insurers/")
+def public_insurers_slash():
+    return public_insurers()
+
+@router.get("/documents/")
+def public_documents_slash(
+    insurer: str = ""
+):
+    return public_documents(
+        insurer=insurer
+    )
