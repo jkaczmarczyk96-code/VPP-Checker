@@ -88,7 +88,7 @@ export default function Home() {
   async function loadInsurers() {
     try {
       const res = await fetch(
-        `${api}/api/v1/admin/insurers`
+        `${api}/api/v1/public/insurers`
       );
 
       const data = await res.json();
@@ -114,7 +114,7 @@ export default function Home() {
 
     try {
       const res = await fetch(
-        `${api}/api/v1/admin/documents?insurer=${encodeURIComponent(
+        `${api}/api/v1/public/documents?insurer=${encodeURIComponent(
           insurer
         )}`
       );
