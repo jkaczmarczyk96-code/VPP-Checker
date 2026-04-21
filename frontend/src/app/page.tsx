@@ -63,6 +63,18 @@ export default function Home() {
 
   const [error, setError] = useState("");
 
+  const [copiedIndex, setCopiedIndex] =
+    useState<number | null>(null);
+
+  const [ratedIndexes, setRatedIndexes] =
+    useState<number[]>([]);
+
+  const [openCommentIndex, setOpenCommentIndex] =
+    useState<number | null>(null);
+
+  const [feedbackComment, setFeedbackComment] =
+    useState("");
+
   const chatRef = useRef<HTMLDivElement>(null);
   const textareaRef =
     useRef<HTMLTextAreaElement>(null);
@@ -138,8 +150,6 @@ export default function Home() {
         (item): item is string =>
           item.trim() !== ""
       );
-
-      setDocuments(titles);
 
       setDocuments(titles);
     } catch (e) {
@@ -240,6 +250,71 @@ export default function Home() {
       setThinking(false);
       textareaRef.current?.focus();
     }
+  }
+
+  /* ================= FEEDBACK ================= */
+
+  async function sendFeedback(
+    index: number,
+    rating: "up" | "down",
+    comment = ""
+  ) {
+    if (ratedIndexes.includes(index)) {
+      return;
+    }
+
+    const aiMessage = messages[index];
+    const userMessage =
+      messages[index - 1];
+
+    try {
+      await fetch(
+        `${api}/api/v1/feedback`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            question:
+              userMessage?.text || "",
+            answer:
+              aiMessage?.text || "",
+            rating,
+            comment,
+            insurer,
+            document_title:
+              documentName,
+          }),
+        }
+      );
+
+      setRatedIndexes((prev) => [
+        ...prev,
+        index,
+      ]);
+
+      setOpenCommentIndex(null);
+      setFeedbackComment("");
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function copyText(
+    text: string,
+    index: number
+  ) {
+    navigator.clipboard.writeText(
+      text
+    );
+
+    setCopiedIndex(index);
+
+    setTimeout(() => {
+      setCopiedIndex(null);
+    }, 1500);
   }
 
   const canSend =
@@ -353,8 +428,59 @@ export default function Home() {
 
                   {msg.role ===
                     "ai" && (
-                    <div className="mb-3 text-xs text-zinc-400">
-                      🤖 VPP Asistent
+                    <div className="flex justify-between mb-3 text-xs text-zinc-400">
+
+                      <span>
+                        🤖 VPP Asistent
+                      </span>
+
+                      <div className="flex gap-3">
+
+                        <button
+                          disabled={ratedIndexes.includes(
+                            index
+                          )}
+                          onClick={() =>
+                            sendFeedback(
+                              index,
+                              "up"
+                            )
+                          }
+                          className="hover:text-white disabled:opacity-40"
+                        >
+                          👍
+                        </button>
+
+                        <button
+                          disabled={ratedIndexes.includes(
+                            index
+                          )}
+                          onClick={() =>
+                            setOpenCommentIndex(
+                              index
+                            )
+                          }
+                          className="hover:text-white disabled:opacity-40"
+                        >
+                          👎
+                        </button>
+
+                        <button
+                          onClick={() =>
+                            copyText(
+                              msg.text,
+                              index
+                            )
+                          }
+                          className="hover:text-white"
+                        >
+                          {copiedIndex ===
+                          index
+                            ? "✓"
+                            : "⧉"}
+                        </button>
+
+                      </div>
                     </div>
                   )}
 
@@ -379,8 +505,7 @@ export default function Home() {
                             >
                               <summary className="cursor-pointer text-sm text-zinc-400">
                                 📄 Zdroj{" "}
-                                {i +
-                                  1}
+                                {i + 1}
                               </summary>
 
                               <div className="mt-2 text-sm text-zinc-300 space-y-2">
@@ -415,6 +540,39 @@ export default function Home() {
                         )}
                       </div>
                     )}
+
+                  {openCommentIndex ===
+                    index && (
+                    <div className="mt-4 space-y-2">
+
+                      <textarea
+                        value={
+                          feedbackComment
+                        }
+                        onChange={(e) =>
+                          setFeedbackComment(
+                            e.target.value
+                          )
+                        }
+                        placeholder="Co bylo špatně?"
+                        className="w-full rounded-xl bg-zinc-950 border border-zinc-800 p-3 text-sm"
+                      />
+
+                      <button
+                        onClick={() =>
+                          sendFeedback(
+                            index,
+                            "down",
+                            feedbackComment
+                          )
+                        }
+                        className="bg-white text-black px-4 py-2 rounded-xl text-sm active:scale-95 transition"
+                      >
+                        Odeslat feedback
+                      </button>
+
+                    </div>
+                  )}
 
                 </div>
               </div>
