@@ -121,20 +121,25 @@ export default function Home() {
 
       const data = await res.json();
 
-      const titles: string[] = Array.from(
+      const docs =
+        (data.documents ||
+          []) as DocumentsApiItem[];
+
+      const titles = Array.from(
         new Set(
-          (data.documents ||
-            []).map(
-            (
-              d: DocumentsApiItem
-            ) =>
-              String(
-                d.document_title ||
-                  ""
-              )
+          docs.map((d) =>
+            String(
+              d.document_title ||
+                ""
+            )
           )
         )
-      ).filter(Boolean);
+      ).filter(
+        (item): item is string =>
+          item.trim() !== ""
+      );
+
+      setDocuments(titles);
 
       setDocuments(titles);
     } catch (e) {
