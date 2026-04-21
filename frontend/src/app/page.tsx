@@ -20,6 +20,10 @@ type ChatResponse = {
   source_quote?: string;
 };
 
+type DocumentsApiItem = {
+  document_title?: string;
+};
+
 const WELCOME_MESSAGE: Message = {
   role: "ai",
   text: "Dobrý den. Jsem připraven analyzovat vaše pojistné podmínky a najít přesné informace.",
@@ -30,7 +34,11 @@ function normalizeMessageText(text: string) {
 
   try {
     const parsed = JSON.parse(text);
-    if (parsed?.answer) return parsed.answer;
+
+    if (parsed?.answer) {
+      return parsed.answer;
+    }
+
     return text;
   } catch {
     return text;
@@ -85,7 +93,11 @@ export default function Home() {
 
       const data = await res.json();
 
-      setInsurers(data.insurers || []);
+      setInsurers(
+        Array.isArray(data.insurers)
+          ? data.insurers
+          : []
+      );
     } catch (e) {
       console.error(e);
       setError(
@@ -109,14 +121,20 @@ export default function Home() {
 
       const data = await res.json();
 
-      const titles = Array.from(
+      const titles: string[] = Array.from(
         new Set(
-          (data.documents || []).map(
-            (d: any) =>
-              d.document_title
+          (data.documents ||
+            []).map(
+            (
+              d: DocumentsApiItem
+            ) =>
+              String(
+                d.document_title ||
+                  ""
+              )
           )
         )
-      );
+      ).filter(Boolean);
 
       setDocuments(titles);
     } catch (e) {
@@ -135,8 +153,9 @@ export default function Home() {
       !insurer ||
       !documentName ||
       loading
-    )
+    ) {
       return;
+    }
 
     const userText = question.trim();
 
@@ -230,7 +249,6 @@ export default function Home() {
     <main className="min-h-screen bg-zinc-950 text-white flex flex-col">
       <div className="mx-auto w-full max-w-5xl px-4 md:px-6 flex flex-col h-screen">
 
-        {/* HEADER */}
         <header className="py-6 border-b border-zinc-800">
           <h1 className="text-3xl font-semibold">
             VPP Checker
@@ -303,7 +321,6 @@ export default function Home() {
           )}
         </header>
 
-        {/* CHAT */}
         <section
           ref={chatRef}
           className="flex-1 overflow-y-auto py-8 space-y-6"
@@ -362,6 +379,7 @@ export default function Home() {
                               </summary>
 
                               <div className="mt-2 text-sm text-zinc-300 space-y-2">
+
                                 {s.document && (
                                   <div>
                                     {
@@ -385,6 +403,7 @@ export default function Home() {
                                     }
                                   </div>
                                 )}
+
                               </div>
                             </details>
                           )
@@ -400,14 +419,14 @@ export default function Home() {
           {thinking && (
             <div className="flex justify-start">
               <div className="rounded-3xl bg-zinc-900 border border-zinc-800 px-5 py-4 text-zinc-400 animate-pulse">
-                VPP Asistent přemýšlí...
+                VPP Asistent
+                přemýšlí...
               </div>
             </div>
           )}
 
         </section>
 
-        {/* INPUT */}
         <footer className="py-5 border-t border-zinc-800 flex gap-3">
 
           <textarea
