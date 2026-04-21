@@ -35,7 +35,7 @@ export default function AdminPage() {
   };
 
   const loadInsurers = async () => {
-    const res = await fetch(`${api}/admin/insurers`, {
+    const res = await fetch(`${api}/api/v1/admin/insurers`, {
       credentials: "include",
     });
 
@@ -144,7 +144,7 @@ export default function AdminPage() {
     if (!insurer) return;
 
     await fetch(
-      `${api}/admin/insurers/${encodeURIComponent(insurer)}`,
+      `${api}/api/v1/admin/insurers/${encodeURIComponent(insurer)}`,
       {
         method: "DELETE",
         credentials: "include",
@@ -177,7 +177,7 @@ export default function AdminPage() {
     formData.append("insurer", insurer);
     formData.append("document_title", documentTitle);
 
-    const res = await fetch(`${api}/upload`, {
+    const res = await fetch(`${api}/api/v1/upload`, {
       method: "POST",
       credentials: "include",
       body: formData,
@@ -203,7 +203,7 @@ export default function AdminPage() {
 
     if (!confirmed) return;
 
-    const res = await fetch(`${api}/upload/${filename}`, {
+    const res = await fetch(`${api}/api/v1/upload/${filename}`, {
       method: "DELETE",
       credentials: "include",
     });
